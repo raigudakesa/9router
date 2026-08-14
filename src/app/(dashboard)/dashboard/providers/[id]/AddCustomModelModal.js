@@ -9,10 +9,12 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
   const [testStatus, setTestStatus] = useState(null); // null | "testing" | "ok" | "error"
   const [testError, setTestError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [vision, setVision] = useState(false);
+  const [reasoning, setReasoning] = useState(false);
 
   // Reset state when modal opens
   useEffect(() => {
-    if (isOpen) { setModelId(""); setTestStatus(null); setTestError(""); }
+    if (isOpen) { setModelId(""); setTestStatus(null); setTestError(""); setVision(false); setReasoning(false); }
   }, [isOpen]);
 
   // Strip provider's own alias prefix (e.g. "cc/model" -> "model" for cc provider)
@@ -46,7 +48,7 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
     if (!cleanId || saving) return;
     setSaving(true);
     try {
-      await onSave(cleanId);
+      await onSave(cleanId, { vision, reasoning });
     } finally {
       setSaving(false);
     }
@@ -99,6 +101,37 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
             <span>{testError || "Model not reachable"}</span>
           </div>
         )}
+
+        {/* Capabilities — tell 9Router this custom model can read images / emit reasoning,
+            so vision blocks aren't stripped and thinking is enabled for it. */}
+        <div>
+          <label className="text-sm font-medium mb-1.5 block">Capabilities</label>
+          <div className="flex flex-col gap-2">
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={vision}
+                onChange={(e) => setVision(e.target.checked)}
+                className="w-4 h-4 accent-primary"
+              />
+              <span className="material-symbols-outlined text-base text-text-muted">image</span>
+              Vision (model can read images)
+            </label>
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={reasoning}
+                onChange={(e) => setReasoning(e.target.checked)}
+                className="w-4 h-4 accent-primary"
+              />
+              <span className="material-symbols-outlined text-base text-text-muted">neurology</span>
+              Reasoning (model supports thinking / reasoning)
+            </label>
+          </div>
+          <p className="text-xs text-text-muted mt-1">
+            Leave unchecked for a plain text model. Enable Vision to keep image inputs; enable Reasoning to allow thinking output.
+          </p>
+        </div>
 
         <div className="flex gap-2 pt-1">
           <Button onClick={onClose} variant="ghost" fullWidth size="sm">Cancel</Button>

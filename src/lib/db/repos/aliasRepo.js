@@ -30,14 +30,18 @@ export async function getCustomModels() {
 }
 
 // Atomic check-then-insert inside transaction to prevent duplicate races
-export async function addCustomModel({ providerAlias, id, type = "llm", name }) {
+export async function addCustomModel({ providerAlias, id, type = "llm", name, caps }) {
   const k = customKey(providerAlias, id, type);
   const db = await getAdapter();
   let added = false;
   db.transaction(() => {
     const row = db.get(`SELECT 1 FROM kv WHERE scope = 'customModels' AND key = ?`, [k]);
     if (row) return;
-    const value = stringifyJson({ providerAlias, id, type, name: name || id });
+    const record = { providerAlias, id, type, name: name || id };
+    // Persist user-declared capabilities (vision/reasoning/...) when provided so
+    // the runtime resolver can lift the model above the text-only default.
+    if (caps && typeof caps === "object") record.caps = caps;
+    const value = stringifyJson(record);
     db.run(`INSERT INTO kv(scope, key, value) VALUES('customModels', ?, ?)`, [k, value]);
     added = true;
   });
@@ -46,6 +50,20 @@ export async function addCustomModel({ providerAlias, id, type = "llm", name }) 
 
 export async function deleteCustomModel({ providerAlias, id, type = "llm" }) {
   await customKv.remove(customKey(providerAlias, id, type));
+}
+
+// Return the stored capability overrides ({vision, reasoning, ...}) for a custom
+// model, or null when the model isn't a custom model or carries no caps. Looked
+// up by providerAlias + id (the LLM type — vision/reasoning apply to chat models).
+// Fail-open: any DB error resolves to null so routing is never blocked.
+export async function getCustomModelCaps(providerAlias, id) {
+  if (!providerAlias || !id) return null;
+  try {
+    const raw = await customKv.get(customKey(providerAlias, id, "llm"));
+    return raw && raw.caps && typeof raw.caps === "object" ? raw.caps : null;
+  } catch {
+    return null;
+  }
 }
 
 // mitmAlias: key=toolName, value=mappings object

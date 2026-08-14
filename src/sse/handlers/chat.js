@@ -8,6 +8,7 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
+import { getCustomModelCaps } from "@/models";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
@@ -259,9 +260,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+    // Custom models carry user-declared vision/reasoning caps; look them up by the
+    // provider alias the user registered under (fail-open: null when not a custom model).
+    const customCaps = await getCustomModelCaps(modelInfo.providerAlias, model);
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
-      modelInfo: { provider, model },
+      modelInfo: { provider, model, customCaps },
       credentials: refreshedCredentials,
       log,
       clientRawRequest,
