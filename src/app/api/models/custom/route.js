@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCustomModels, addCustomModel, deleteCustomModel } from "@/models";
+import { OVERRIDABLE_CAPABILITY_KEYS } from "open-sse/providers/capabilities.js";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +26,7 @@ export async function POST(request) {
     let cleanCaps;
     if (caps && typeof caps === "object") {
       cleanCaps = {};
-      for (const key of ["vision", "reasoning", "pdf", "audioInput"]) {
+      for (const key of OVERRIDABLE_CAPABILITY_KEYS) {
         if (typeof caps[key] === "boolean") cleanCaps[key] = caps[key];
       }
       if (Object.keys(cleanCaps).length === 0) cleanCaps = undefined;

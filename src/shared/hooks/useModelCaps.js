@@ -7,7 +7,7 @@ import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 let cache = null; // { byFull, byId } | null
 let inflight = null;
 
-function buildMaps(models) {
+function buildMaps(models, customModels) {
   const byFull = {};
   const byId = {};
   for (const m of models || []) {
@@ -16,17 +16,26 @@ function buildMaps(models) {
     if (m.routedModel) byFull[m.routedModel] = m.caps;
     if (m.model) byId[m.model] = m.caps;
   }
+  // User-added custom models carry their own declared caps (vision/reasoning/…).
+  // /api/models only lists built-ins, so without this a custom combo member
+  // resolves to registry-default caps and its badges are wrong/empty.
+  for (const m of customModels || []) {
+    if (!m?.caps || !m?.providerAlias || !m?.id) continue;
+    byFull[`${m.providerAlias}/${m.id}`] = m.caps;
+    if (!byId[m.id]) byId[m.id] = m.caps;
+  }
   return { byFull, byId };
 }
 
 function loadModelCaps() {
   if (cache) return Promise.resolve(cache);
   if (inflight) return inflight;
-  inflight = fetch("/api/models")
-    .then(async (res) => {
-      if (!res.ok) throw new Error(`models ${res.status}`);
-      const data = await res.json();
-      cache = buildMaps(data.models);
+  inflight = Promise.all([
+    fetch("/api/models").then((r) => (r.ok ? r.json() : { models: [] })).catch(() => ({ models: [] })),
+    fetch("/api/models/custom", { cache: "no-store" }).then((r) => (r.ok ? r.json() : { models: [] })).catch(() => ({ models: [] })),
+  ])
+    .then(([data, customData]) => {
+      cache = buildMaps(data.models, customData.models);
       return cache;
     })
     .catch(() => {
@@ -59,16 +68,22 @@ export function useModelCaps() {
   const [byId, setById] = useState(() => cache?.byId || {});
 
   useEffect(() => {
-    if (cache) {
-      setByFull(cache.byFull);
-      setById(cache.byId);
-      return;
-    }
     let alive = true;
-    loadModelCaps().then((maps) => {
-      if (alive) { setByFull(maps.byFull); setById(maps.byId); }
-    });
-    return () => { alive = false; };
+    const load = () => {
+      loadModelCaps().then((maps) => {
+        if (alive) { setByFull(maps.byFull); setById(maps.byId); }
+      });
+    };
+    // cache-hit is already seeded by the useState initializers; only fetch on miss
+    if (!cache) load();
+    // Adding/removing a custom model (with new caps) should refresh badges
+    // without a full reload — the providers page fires this on change.
+    const onCustomModelChanged = () => { cache = null; load(); };
+    if (typeof window !== "undefined") window.addEventListener("customModelChanged", onCustomModelChanged);
+    return () => {
+      alive = false;
+      if (typeof window !== "undefined") window.removeEventListener("customModelChanged", onCustomModelChanged);
+    };
   }, []);
 
   const getCaps = useCallback(

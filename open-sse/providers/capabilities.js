@@ -71,7 +71,7 @@ export function capabilitiesFromServiceKind(kind) {
 // boolean input/output/feature flags a user can meaningfully toggle are honored;
 // unknown keys are ignored so a malformed record can never widen the schema.
 // Returns {} when there is nothing to apply (so callers can spread safely).
-const OVERRIDABLE_CAPABILITY_KEYS = ["vision", "pdf", "audioInput", "videoInput", "imageOutput", "audioOutput", "search", "reasoning"];
+export const OVERRIDABLE_CAPABILITY_KEYS = ["vision", "pdf", "audioInput", "videoInput", "imageOutput", "audioOutput", "search", "reasoning"];
 export function normalizeCapabilityOverrides(overrides) {
   if (!overrides || typeof overrides !== "object") return {};
   const out = {};
