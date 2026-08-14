@@ -557,6 +557,45 @@ export default function ProviderDetailPage() {
     }
   };
 
+  const handleUpdateCustomModel = async (modelId, { newId, caps } = {}, type = "llm", providerAliasOverride = providerStorageAlias) => {
+    try {
+      const res = await fetch("/api/models/custom", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerAlias: providerAliasOverride, id: modelId, type, ...(newId ? { newId } : {}), ...(caps ? { caps } : {}) }),
+      });
+      if (res.ok) {
+        await fetchCustomModels();
+        if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("customModelChanged"));
+        return true;
+      }
+      const data = await res.json();
+      alert(data.error || "Failed to update custom model");
+      return false;
+    } catch (error) {
+      console.log("Error updating custom model:", error);
+      return false;
+    }
+  };
+
+  const handleClearCustomModels = async (type = "llm", providerAliasOverride = providerStorageAlias) => {
+    try {
+      const params = new URLSearchParams({ providerAlias: providerAliasOverride, all: "true", type });
+      const res = await fetch(`/api/models/custom?${params}`, { method: "DELETE" });
+      if (res.ok) {
+        await fetchCustomModels();
+        if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("customModelChanged"));
+        return true;
+      }
+      const data = await res.json();
+      alert(data.error || "Failed to clear custom models");
+      return false;
+    } catch (error) {
+      console.log("Error clearing custom models:", error);
+      return false;
+    }
+  };
+
   // Fetch Qoder model list and automatically add to available models
   const handleImportQoderModels = async () => {
     if (importingQoderModels) return;
@@ -1084,6 +1123,8 @@ export default function ProviderDetailPage() {
           onDeleteAlias={handleDeleteAlias}
           onAddCustomModel={(modelId, caps = null) => handleAddCustomModel(modelId, "llm", providerStorageAlias, caps)}
           onDeleteCustomModel={(modelId) => handleDeleteCustomModel(modelId, "llm", providerStorageAlias)}
+          onUpdateCustomModel={(modelId, changes) => handleUpdateCustomModel(modelId, changes, "llm", providerStorageAlias)}
+          onClearCustomModels={() => handleClearCustomModels("llm", providerStorageAlias)}
           connections={connections}
           isAnthropic={isAnthropicCompatible}
         />
