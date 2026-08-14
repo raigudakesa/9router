@@ -23,6 +23,7 @@
 // 2.0+, Grok, Perplexity). Verify with: curl -s https://models.dev/api.json
 
 import { matchPattern } from "./pricing.js";
+import { getCustomModelCapsOverride } from "./customModelCaps.js";
 
 /**
  * Safe floor — every resolved result is merged over this so consumers
@@ -64,6 +65,25 @@ const SERVICE_KIND_CAPABILITIES = {
 
 export function capabilitiesFromServiceKind(kind) {
   return SERVICE_KIND_CAPABILITIES[kind] || null;
+}
+
+// Per-model capability overrides carried by user-added custom models. Only the
+// boolean input/output/feature flags a user can meaningfully toggle are honored;
+// unknown keys are ignored so a malformed record can never widen the schema.
+// Returns {} when there is nothing to apply (so callers can spread safely).
+export const OVERRIDABLE_CAPABILITY_KEYS = ["vision", "pdf", "audioInput", "videoInput", "imageOutput", "audioOutput", "search", "reasoning"];
+export function normalizeCapabilityOverrides(overrides) {
+  if (!overrides || typeof overrides !== "object") return {};
+  const out = {};
+  for (const key of OVERRIDABLE_CAPABILITY_KEYS) {
+    if (typeof overrides[key] === "boolean") out[key] = overrides[key];
+  }
+  // When a custom model is flagged reasoning:true but carries no wire format,
+  // default to the OpenAI-style reasoning_effort channel (the widest-compatible
+  // format for generic OpenAI-compatible custom providers).
+  if (out.reasoning === true && !overrides.thinkingFormat) out.thinkingFormat = "openai";
+  else if (typeof overrides.thinkingFormat === "string") out.thinkingFormat = overrides.thinkingFormat;
+  return out;
 }
 
 /**
@@ -324,8 +344,13 @@ export const PATTERN_CAPABILITIES = [
  * @param {string} model
  * @returns {object} full capabilities object
  */
-export function getCapabilitiesForModel(provider, model) {
-  if (!model) return { ...DEFAULT_CAPABILITIES };
+export function getCapabilitiesForModel(provider, model, overrides = null) {
+  // User-set custom-model overrides win over registry-derived caps: the user has
+  // explicitly declared what their model supports, so apply them last (on top).
+  // When no explicit overrides are passed (most deep call sites), consult the
+  // process-wide custom-model registry so vision/reasoning apply pipeline-wide.
+  const ov = normalizeCapabilityOverrides(overrides || getCustomModelCapsOverride(provider, model));
+  if (!model) return { ...DEFAULT_CAPABILITIES, ...ov };
 
   // Canonical exact lookup strips vendor prefix: "anthropic/claude-opus-4.7" -> "claude-opus-4.7".
   const baseModel = model.includes("/") ? model.split("/").pop() : model;
@@ -333,21 +358,21 @@ export function getCapabilitiesForModel(provider, model) {
   // 1. Provider-specific override
   if (provider) {
     const providerCaps = PROVIDER_CAPABILITIES[provider];
-    if (providerCaps?.[model]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[model] };
-    if (providerCaps?.[baseModel]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[baseModel] };
+    if (providerCaps?.[model]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[model], ...ov };
+    if (providerCaps?.[baseModel]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[baseModel], ...ov };
   }
 
   // 2. Canonical exact
-  if (MODEL_CAPABILITIES[baseModel]) return { ...DEFAULT_CAPABILITIES, ...MODEL_CAPABILITIES[baseModel] };
-  if (MODEL_CAPABILITIES[model]) return { ...DEFAULT_CAPABILITIES, ...MODEL_CAPABILITIES[model] };
+  if (MODEL_CAPABILITIES[baseModel]) return { ...DEFAULT_CAPABILITIES, ...MODEL_CAPABILITIES[baseModel], ...ov };
+  if (MODEL_CAPABILITIES[model]) return { ...DEFAULT_CAPABILITIES, ...MODEL_CAPABILITIES[model], ...ov };
 
   // 3. Pattern match (first match wins)
   for (const { pattern, caps } of PATTERN_CAPABILITIES) {
     if (matchPattern(pattern, baseModel) || matchPattern(pattern, model)) {
-      return { ...DEFAULT_CAPABILITIES, ...caps };
+      return { ...DEFAULT_CAPABILITIES, ...caps, ...ov };
     }
   }
 
-  // 4. Floor
-  return { ...DEFAULT_CAPABILITIES };
+  // 4. Floor (custom/unknown model: only user overrides lift it above text-only)
+  return { ...DEFAULT_CAPABILITIES, ...ov };
 }

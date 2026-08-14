@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import PropTypes from "prop-types";
-import { Button } from "@/shared/components";
+import { Button, CapacityBadges } from "@/shared/components";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
-function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias, onTest, testStatus, isTesting }) {
+import { CUSTOM_MODEL_CAP_OPTIONS, EMPTY_CUSTOM_MODEL_CAPS } from "@/shared/constants/customModelCaps";
+function CompatibleModelRow({ modelId, fullModel, caps, copied, onCopy, onDeleteAlias, onTest, testStatus, isTesting }) {
   const borderColor = testStatus === "ok"
     ? "border-green-500/40"
     : testStatus === "error"
@@ -26,7 +27,10 @@ function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias,
         {testStatus === "ok" ? "check_circle" : testStatus === "error" ? "cancel" : "smart_toy"}
       </span>
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium truncate">{modelId}</p>
+        <div className="flex items-center gap-2 min-w-0">
+          <p className="text-sm font-medium truncate">{modelId}</p>
+          <CapacityBadges caps={caps} size={14} />
+        </div>
         <div className="flex items-center gap-1 mt-1">
           <code className="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{fullModel}</code>
           <div className="relative group/btn">
@@ -77,6 +81,7 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
   const [importing, setImporting] = useState(false);
   const [testingModelId, setTestingModelId] = useState(null);
   const [modelTestResults, setModelTestResults] = useState({});
+  const [caps, setCaps] = useState(() => ({ ...EMPTY_CUSTOM_MODEL_CAPS }));
 
   const handleTestModel = async (modelId) => {
     if (testingModelId) return;
@@ -113,8 +118,9 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
 
     setAdding(true);
     try {
-      await onAddCustomModel(modelId);
+      await onAddCustomModel(modelId, { ...caps });
       setNewModel("");
+      setCaps({ ...EMPTY_CUSTOM_MODEL_CAPS });
     } catch (error) {
       console.log("Error adding model:", error);
     } finally {
@@ -187,6 +193,26 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
         </Button>
       </div>
 
+      {/* Capabilities for the model being added — tell 9Router what this model can
+          read/emit so the runtime resolver lifts it above the text-only default. */}
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          {CUSTOM_MODEL_CAP_OPTIONS.map((opt) => (
+            <label key={opt.key} className="flex items-center gap-2 text-sm cursor-pointer select-none" title={opt.desc}>
+              <input
+                type="checkbox"
+                checked={!!caps[opt.key]}
+                onChange={(e) => setCaps((prev) => ({ ...prev, [opt.key]: e.target.checked }))}
+                className="w-4 h-4 accent-primary"
+              />
+              <span className="material-symbols-outlined text-base text-text-muted">{opt.icon}</span>
+              {opt.label}
+            </label>
+          ))}
+        </div>
+        <span className="text-xs text-text-muted">Applied to the model added via the Model ID field above.</span>
+      </div>
+
       {!canImport && (
         <p className="text-xs text-text-muted">
           Add a connection to enable importing models.
@@ -195,11 +221,12 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
 
       {allModels.length > 0 && (
         <div className="flex flex-col gap-3">
-          {allModels.map(({ id, alias, source }) => (
+          {allModels.map(({ id, alias, source, caps: rowCaps }) => (
             <CompatibleModelRow
               key={`${source}-${providerStorageAlias}/${id}`}
               modelId={id}
               fullModel={`${providerDisplayAlias}/${id}`}
+              caps={rowCaps}
               copied={copied}
               onCopy={onCopy}
               onDeleteAlias={() => source === "custom" ? onDeleteCustomModel(id) : onDeleteAlias(alias)}
@@ -222,7 +249,8 @@ CompatibleModelsSection.propTypes = {
   copied: PropTypes.string,
   onCopy: PropTypes.func.isRequired,
   onDeleteAlias: PropTypes.func.isRequired,
-  onAddCustomModel: PropTypes.func.isRequired,
+  onAddCustomModel: PropTypes.func.isRequired, // (modelId, caps?) => Promise
+
   onDeleteCustomModel: PropTypes.func.isRequired,
   connections: PropTypes.arrayOf(PropTypes.shape({
     id: PropTypes.string,

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getCustomModels, addCustomModel, deleteCustomModel } from "@/models";
+import { OVERRIDABLE_CAPABILITY_KEYS } from "open-sse/providers/capabilities.js";
 
 export const dynamic = "force-dynamic";
 
@@ -17,11 +18,20 @@ export async function GET() {
 // POST /api/models/custom - Add custom model
 export async function POST(request) {
   try {
-    const { providerAlias, id, type, name } = await request.json();
+    const { providerAlias, id, type, name, caps } = await request.json();
     if (!providerAlias || !id) {
       return NextResponse.json({ error: "providerAlias and id required" }, { status: 400 });
     }
-    const added = await addCustomModel({ providerAlias, id, type: type || "llm", name });
+    // Sanitize capability flags — only accept the booleans the UI can toggle.
+    let cleanCaps;
+    if (caps && typeof caps === "object") {
+      cleanCaps = {};
+      for (const key of OVERRIDABLE_CAPABILITY_KEYS) {
+        if (typeof caps[key] === "boolean") cleanCaps[key] = caps[key];
+      }
+      if (Object.keys(cleanCaps).length === 0) cleanCaps = undefined;
+    }
+    const added = await addCustomModel({ providerAlias, id, type: type || "llm", name, caps: cleanCaps });
     return NextResponse.json({ success: true, added });
   } catch (error) {
     console.log("Error adding custom model:", error);

@@ -8,7 +8,10 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
+import { getCustomModelCaps, getCustomModels } from "@/models";
 import { getModelInfo, getComboModels } from "../services/model.js";
+import { resolveProviderAlias } from "open-sse/services/model.js";
+import { registerCustomModelCaps } from "open-sse/providers/customModelCaps.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
@@ -22,6 +25,30 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+
+// Combo routing (reorderByCapabilities / capacity-adapter) decides member ORDER by
+// calling getCapabilitiesForModel BEFORE any member reaches chatCore — where custom
+// caps normally get registered. On a cold registry that makes a custom vision/reasoning
+// model look text-only, so it wouldn't be floated for an image/thinking request. Warm
+// the engine-side caps registry from the DB up front so those decisions see user caps.
+// Short TTL cache: cheap kv scan, refreshed lazily; fail-open (never blocks a request).
+let _customCapsWarmedAt = 0;
+const CUSTOM_CAPS_WARM_TTL_MS = 5000;
+async function warmCustomModelCaps() {
+  if (Date.now() - _customCapsWarmedAt < CUSTOM_CAPS_WARM_TTL_MS) return;
+  _customCapsWarmedAt = Date.now();
+  try {
+    const models = await getCustomModels();
+    for (const m of models) {
+      if (!m?.providerAlias || !m?.id || !m?.caps) continue;
+      // Register under the resolved provider id — the same value combo's
+      // getCapabilitiesForModel(provider, model) is keyed by.
+      registerCustomModelCaps(resolveProviderAlias(m.providerAlias), m.id, m.caps);
+    }
+  } catch {
+    // fail-open: cold registry just means caps warm up on first routed request
+  }
+}
 
 /**
  * Handle chat completion request
@@ -83,6 +110,10 @@ export async function handleChat(request, clientRawRequest = null) {
   const userAgent = request?.headers?.get("user-agent") || "";
   const bypassResponse = handleBypassRequest(body, modelStr, userAgent, !!settings.ccFilterNaming);
   if (bypassResponse) return bypassResponse.response || bypassResponse;
+
+  // Ensure custom-model caps are in the engine registry before combo/capacity-adapter
+  // routing consults getCapabilitiesForModel (otherwise cold-start custom models look text-only).
+  await warmCustomModelCaps();
 
   const requiredCapabilities = detectRequiredCapabilities(body);
 
@@ -259,9 +290,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+    // Custom models carry user-declared vision/reasoning caps; look them up by the
+    // provider alias the user registered under (fail-open: null when not a custom model).
+    const customCaps = await getCustomModelCaps(modelInfo.providerAlias, model);
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
-      modelInfo: { provider, model },
+      modelInfo: { provider, model, customCaps },
       credentials: refreshedCredentials,
       log,
       clientRawRequest,
