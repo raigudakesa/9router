@@ -22,7 +22,7 @@ beforeAll(async () => {
   vi.resetModules();
   db = await import("@/lib/db/index.js");
   await db.initDb();
-  await db.updateSettings({ enableObservability2: true, observabilityBatchSize: 1 });
+  await db.updateSettings({ enableObservability: true, observabilityBatchSize: 1 });
 
   const { getAdapter } = await import("@/lib/db/driver.js");
   adapter = await getAdapter();
@@ -205,12 +205,15 @@ describe("token helpers — render-time crash safety", () => {
 
 describe("API route contract — validation boundary", () => {
   let GET;
+  let createDashboardAuthToken;
   beforeAll(async () => {
     ({ GET } = await import("@/app/api/usage/request-details/route.js"));
+    ({ createDashboardAuthToken } = await import("@/lib/auth/dashboardSession.js"));
   });
 
-  function makeReq(query) {
-    return new Request(`http://localhost/api/usage/request-details?${query}`);
+  function makeReq(query, cookie) {
+    const headers = cookie ? { cookie } : undefined;
+    return new Request(`http://localhost/api/usage/request-details?${query}`, { headers });
   }
 
   it("page=0 → 400 (guard now reachable after NaN-check fix)", async () => {
@@ -248,5 +251,38 @@ describe("API route contract — validation boundary", () => {
     const body = await res.json();
     expect(Array.isArray(body.details)).toBe(true);
     expect(body.pagination).toMatchObject({ page: 1, pageSize: 20 });
+  });
+
+  it("no auth cookie → conversation payloads redacted", async () => {
+    await saveDetail({
+      id: "owner-check-1", provider: "openai", model: "gpt-4",
+      status: "ok", tokens: { prompt_tokens: 5 },
+      request: { messages: [{ role: "user", content: "secret prompt" }] },
+      response: { content: "secret answer" },
+    });
+    const res = await GET(makeReq("page=1&pageSize=100"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const row = body.details.find((d) => d.id === "owner-check-1");
+    expect(row.request).toEqual({ redacted: true });
+    expect(row.response).toEqual({ redacted: true });
+  });
+
+  it("valid dashboard auth_token cookie → conversation payloads unredacted", async () => {
+    const token = await createDashboardAuthToken();
+    const res = await GET(makeReq("page=1&pageSize=100", `auth_token=${token}`));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const row = body.details.find((d) => d.id === "owner-check-1");
+    expect(row.request).toEqual({ messages: [{ role: "user", content: "secret prompt" }] });
+    expect(row.response).toEqual({ content: "secret answer" });
+  });
+
+  it("garbage auth_token cookie → treated as anonymous, still redacted", async () => {
+    const res = await GET(makeReq("page=1&pageSize=100", "auth_token=not-a-real-jwt"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const row = body.details.find((d) => d.id === "owner-check-1");
+    expect(row.request).toEqual({ redacted: true });
   });
 });
