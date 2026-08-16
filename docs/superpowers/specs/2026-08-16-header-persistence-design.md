@@ -23,7 +23,9 @@ are lost on restart (accepted tradeoff; no DB persistence).
 ## Scope
 
 - **In scope:** data-model field, in-memory cache module, resolver hook,
-  executor integration, edit-modal UI, unit tests.
+  executor integration, edit-modal UI (table + nested add/edit popup, icon-only
+  row actions), a small `disableEscape` addition to the shared `Modal`, unit
+  tests.
 - **Out of scope:** DB-backed durability across restarts; cross-connection or
   client-session cache scopes; the `new/page.js` create form (edit-modal only,
   consistent with the base feature).
@@ -121,29 +123,80 @@ In `buildHeaders`, build the hook and pass it to `resolveCustomHeaders`:
   delete, CRLF strip) is unchanged. Whole thing stays inside the existing
   fail-open try/catch.
 
-## UI — `EditCompatibleNodeModal.js`
+## UI — table + nested header-form popup
 
-Each header row gains, after the Value input:
+The inline row-of-inputs editor is replaced by a **table view** with an
+**add/edit popup**. Two React components:
 
-- A **"Persist"** checkbox.
-- A **minutes** number input, enabled only when Persist is checked, placeholder
-  like `min (0 = ∞)`.
+### `EditCompatibleNodeModal.js` (host) — the Request Headers table
 
-State/derivation:
-
-- Row state carries `{ name, value, ttlMinutes }`.
-- On hydration: `persist = ttlMinutes !== null`; minutes field shows
-  `ttlMinutes ?? ""` (0 rendered as `0`).
-- On change:
-  - Persist unchecked → `ttlMinutes = null`.
-  - Persist checked, minutes empty or `0` → `ttlMinutes = 0` (permanent).
-  - Persist checked, minutes `N` → `ttlMinutes = N`.
-- `handleSubmit` includes `ttlMinutes` per row (empty→null; else `Number`).
-- Client validation: a persistent row with a negative or non-integer minutes
-  value is marked invalid and blocks Save. (Server still coerces to null if it
-  somehow arrives.)
-- Hint text gains one line: "Persist reuses the resolved value per connection —
+- A section header "Request Headers" with a **`+` Add** `Button` above the table.
+- A styled HTML `<table>` (Tailwind, matching existing dashboard table styling)
+  listing the current `customHeaders` rows. Columns:
+  - **Name** — the header name.
+  - **Value** — the raw template value (truncate long values with `title`
+    tooltip / `truncate` class).
+  - **Persist** — rendered from `ttlMinutes`: `null` → `—`; `0` → `∞` (or
+    "Permanent"); `N` → `N min`.
+  - **Actions** (icon-only) — an **Edit** `Button` (`icon="edit"`) and a
+    **Delete** `Button` (`icon="delete"`, `variant="ghost"`), each wrapped in a
+    `Tooltip`.
+- Empty state: a muted "No custom headers" row when the list is empty.
+- **Add** (`+`) opens the popup in "add" mode; **Edit** opens it in "edit" mode
+  pre-filled with that row (tracked by index); **Delete** removes the row from
+  local state immediately (the node only persists on the modal's Save, so no
+  separate confirm needed).
+- Row state is still `{ name, value, ttlMinutes }`; `handleSubmit` includes
+  `ttlMinutes` per row unchanged.
+- Client validation runs on the assembled list (same rules: valid header name,
+  valid ttl) and blocks the modal's Save when any row is invalid — but since the
+  popup validates on submit (below), invalid rows never enter the list in
+  practice.
+- Hint text below the table: "Persist reuses the resolved value per connection —
   0 minutes = permanent (until restart)."
+
+### `HeaderFormModal.js` (new) — the add/edit popup
+
+A small nested `<Modal>` (size `sm`) with the single-header form:
+
+- **Name** `Input` (validated against the header-name regex; error shown
+  inline).
+- **Value** `Input` (placeholder `value or sess_{ralpha_num:26}`), with the
+  dynamic-tag / `{header:...}` / `{opencode_session}` / `{remove}` hint text.
+- **Persist** checkbox (`Toggle` or a checkbox `Input`).
+- **Minutes** number input, enabled only when Persist is checked, placeholder
+  `min (0 = ∞)`.
+- Footer: **Save** (disabled while name invalid or ttl invalid) + **Cancel**.
+- On Save: assembles `{ name: name.trim(), value, ttlMinutes }` (persist
+  unchecked → `null`; checked + empty/0 → `0`; checked + N → `N`) and calls
+  `onSubmit(row)`; the host inserts (add) or replaces at index (edit).
+- Props: `isOpen`, `mode` ("add" | "edit"), `initial` (the row or defaults),
+  `existingNames` (lowercased, minus the row being edited) to warn on duplicate
+  names, `onSubmit`, `onClose`.
+
+### Nested-modal Escape / stacking fix
+
+The shared `Modal` registers a document-level `Escape` listener and uses
+`z-50`; a naive nested modal would (a) let one Escape close both, and (b) stack
+two dim overlays at the same z-index. Fix:
+
+- Extend the shared `Modal` component with an optional **`disableEscape`** prop
+  (default `false`): when true, the component skips registering its Escape
+  handler. This is a small, backward-compatible addition useful for any nested
+  modal.
+- While `HeaderFormModal` is open, the host passes `disableEscape` to its own
+  `EditCompatibleNodeModal`'s `<Modal>` (and `closeOnOverlay={false}`), so
+  Escape and overlay-click only affect the top popup.
+- Render `HeaderFormModal` with a higher stacking context via a `className`
+  that raises its wrapper z-index above `z-50` (e.g. pass `className` that sets
+  `z-[60]` on the fixed wrapper, or add a `zClass` prop) so the popup and its
+  overlay sit above the host modal.
+
+> Implementation note: verify the exact mechanism against `Modal.js` during
+> implementation — the two needed hooks are "don't close the parent on Escape
+> while a child is open" and "paint the child above the parent". The
+> `disableEscape` prop on the parent + a higher z-index on the child satisfy
+> both without breaking existing single-modal usage.
 
 ## Testing
 
@@ -161,6 +214,14 @@ State/derivation:
   regenerates (injected clock); non-persistent still varies.
 - **normalizeCustomHeaders:** `ttlMinutes` null/0/N preserved; negative / NaN /
   non-integer → null; existing name/value validation unchanged.
+- **UI:** No automated UI test harness in this repo (consistent with the base
+  feature). Verification is manual + eslint: the table renders rows with correct
+  Persist column formatting (`—`/`∞`/`N min`); `+` opens the add popup; Edit
+  pre-fills; Delete removes the row; the popup validates name/ttl and blocks its
+  Save; while the popup is open, Escape closes only the popup (not the host
+  modal) and the popup paints above the host. Extend `Modal`'s existing usage
+  without regressing single-modal Escape (spot-check another modal still closes
+  on Escape).
 
 ## Non-goals / risks
 
