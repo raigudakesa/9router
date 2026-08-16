@@ -207,11 +207,14 @@ export class DefaultExecutor extends BaseExecutor {
         for (const h of customHeaders) {
           if (h && typeof h.name === "string") ttlByName.set(h.name.trim().toLowerCase(), h.ttlMinutes);
         }
+        const nowFn = credentials?._nowForTest;
         const resolveValue = (name, rawValue, defaultResolve) => {
           const ttl = ttlByName.get(name.toLowerCase());
-          if (ttl == null) return defaultResolve(); // not persistent
+          // No caching when ttl is unset OR we have no real connection identity
+          // (connId === "default") — avoids sharing a persistent value across accounts.
+          if (ttl == null || connId === "default") return defaultResolve();
           const key = connId + "\0" + name.toLowerCase() + "\0" + rawValue;
-          return getOrResolvePersistent(key, ttl, defaultResolve);
+          return getOrResolvePersistent(key, ttl, defaultResolve, nowFn ? nowFn() : undefined);
         };
         const resolved = resolveCustomHeaders(customHeaders, { resolveValue });
         for (const [name, value] of Object.entries(resolved)) {

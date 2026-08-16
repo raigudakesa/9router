@@ -40,13 +40,16 @@ export default function HeaderFormModal({ isOpen, mode, initial, existingNames =
   };
 
   return (
+    // Correct stacking above the parent modal relies on DOM order: this popup
+    // renders inside the parent modal's children, so it naturally paints on top.
+    // The parent also passes disableEscape / closeOnOverlay={false} while this
+    // popup is open, so it doesn't intercept escape/overlay clicks meant for us.
     <Modal
       isOpen={isOpen}
       onClose={onClose}
       title={mode === "edit" ? "Edit Header" : "Add Header"}
       size="sm"
       closeOnOverlay={false}
-      className="z-[60]"
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>

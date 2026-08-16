@@ -104,4 +104,26 @@ describe("DefaultExecutor buildHeaders — persistence", () => {
     const h2 = ex.buildHeaders(creds([{ name: "X-Session", value: "{ralpha_num:26}", ttlMinutes: 0 }], { connectionId: "conn-2" }), true);
     expect(h2["X-Session"]).not.toBe(h1["X-Session"]);
   });
+
+  it("does not cache a persistent header when connection identity is absent (connId=default)", () => {
+    const ex = new DefaultExecutor("openai-compatible-chat-x");
+    // creds() default extra has no connectionId/email/id
+    const c = creds([{ name: "X-Session", value: "{ralpha_num:26}", ttlMinutes: 0 }]);
+    const a = ex.buildHeaders(c, true)["X-Session"];
+    const b = ex.buildHeaders(c, true)["X-Session"];
+    expect(a).not.toBe(b);
+  });
+
+  it("timed-expiry regenerates through the executor with an injected clock", () => {
+    const ex = new DefaultExecutor("openai-compatible-chat-x");
+    let t = 1000;
+    const mk = () => creds([{ name: "X-Session", value: "{ralpha_num:26}", ttlMinutes: 5 }], { connectionId: "conn-exp", _nowForTest: () => t });
+    const a = ex.buildHeaders(mk(), true)["X-Session"];
+    t = 1000 + 4 * 60000; // within 5 min → cached
+    const b = ex.buildHeaders(mk(), true)["X-Session"];
+    expect(b).toBe(a);
+    t = 1000 + 6 * 60000; // past 5 min → regenerate
+    const c2 = ex.buildHeaders(mk(), true)["X-Session"];
+    expect(c2).not.toBe(a);
+  });
 });
