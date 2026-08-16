@@ -11,6 +11,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
     apiType: "chat",
     baseUrl: "https://api.openai.com/v1",
   });
+  const [customHeaders, setCustomHeaders] = useState([]);
   const [saving, setSaving] = useState(false);
   const [checkKey, setCheckKey] = useState("");
   const [checkModelId, setCheckModelId] = useState("");
@@ -25,6 +26,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
         apiType: node.apiType || "chat",
         baseUrl: node.baseUrl || (isAnthropic ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1"),
       });
+      setCustomHeaders(Array.isArray(node.customHeaders) ? node.customHeaders.map((h) => ({ ...h })) : []);
     }
   }, [node, isAnthropic]);
 
@@ -33,8 +35,18 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
     { value: "responses", label: "Responses API" },
   ];
 
+  const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+  const isInvalidHeaderName = (name) => name.trim() !== "" && !HEADER_NAME_RE.test(name.trim());
+  const hasInvalidHeader = customHeaders.some((h) => isInvalidHeaderName(h.name));
+
+  const updateHeader = (index, field, value) => {
+    setCustomHeaders((rows) => rows.map((r, i) => (i === index ? { ...r, [field]: value } : r)));
+  };
+  const addHeader = () => setCustomHeaders((rows) => [...rows, { name: "", value: "" }]);
+  const removeHeader = (index) => setCustomHeaders((rows) => rows.filter((_, i) => i !== index));
+
   const handleSubmit = async () => {
-    if (!formData.name.trim() || !formData.prefix.trim() || !formData.baseUrl.trim()) return;
+    if (!formData.name.trim() || !formData.prefix.trim() || !formData.baseUrl.trim() || hasInvalidHeader) return;
     setSaving(true);
     try {
       const payload = {
@@ -45,6 +57,9 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
       if (!isAnthropic) {
         payload.apiType = formData.apiType;
       }
+      payload.customHeaders = customHeaders
+        .filter((h) => h.name.trim() !== "")
+        .map((h) => ({ name: h.name.trim(), value: h.value }));
       await onSave(payload);
     } finally {
       setSaving(false);
@@ -107,6 +122,42 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
           placeholder={isAnthropic ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1"}
           hint={`Use the base URL (ending in /v1) for your ${isAnthropic ? "Anthropic" : "OpenAI"}-compatible API.`}
         />
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <label className="text-sm font-medium">Request Headers</label>
+            <Button type="button" variant="secondary" onClick={addHeader}>
+              + Add Header
+            </Button>
+          </div>
+          {customHeaders.map((h, i) => (
+            <div key={i} className="flex gap-2 items-start">
+              <Input
+                placeholder="Header-Name"
+                value={h.name}
+                onChange={(e) => updateHeader(i, "name", e.target.value)}
+                className="flex-1"
+                error={isInvalidHeaderName(h.name) ? "Invalid header name" : undefined}
+              />
+              <Input
+                placeholder="value or sess_{ralpha_num:26}"
+                value={h.value}
+                onChange={(e) => updateHeader(i, "value", e.target.value)}
+                className="flex-1"
+              />
+              <div className="pt-1">
+                <Button type="button" variant="ghost" onClick={() => removeHeader(i)}>
+                  ×
+                </Button>
+              </div>
+            </div>
+          ))}
+          <p className="text-xs text-neutral-500">
+            Overrides preset headers of the same name. Dynamic tags:
+            {" "}<code>{"{ralpha|lalpha|ualpha|num|symbol[_...][:length]}"}</code> generate random values per request
+            (e.g. <code>{"sess_{ralpha_num:26}"}</code>). Copy another header:
+            {" "}<code>{"{header:Other-Header}"}</code>.
+          </p>
+        </div>
         <div className="flex gap-2">
           <Input
             label="API Key (for Check)"
@@ -134,7 +185,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
           </Badge>
         )}
         <div className="flex gap-2">
-          <Button onClick={handleSubmit} fullWidth disabled={!formData.name.trim() || !formData.prefix.trim() || !formData.baseUrl.trim() || saving}>
+          <Button onClick={handleSubmit} fullWidth disabled={!formData.name.trim() || !formData.prefix.trim() || !formData.baseUrl.trim() || saving || hasInvalidHeader}>
             {saving ? "Saving..." : "Save"}
           </Button>
           <Button onClick={onClose} variant="ghost" fullWidth>
@@ -154,6 +205,9 @@ EditCompatibleNodeModal.propTypes = {
     prefix: PropTypes.string,
     apiType: PropTypes.string,
     baseUrl: PropTypes.string,
+    customHeaders: PropTypes.arrayOf(
+      PropTypes.shape({ name: PropTypes.string, value: PropTypes.string })
+    ),
   }),
   onSave: PropTypes.func.isRequired,
   onClose: PropTypes.func.isRequired,
