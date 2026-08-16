@@ -62,6 +62,7 @@ export async function createProviderNode(data) {
     prefix: data.prefix,
     apiType: data.apiType,
     baseUrl: data.baseUrl,
+    ...(data.customHeaders !== undefined ? { customHeaders: data.customHeaders } : {}),
     createdAt: now,
     updatedAt: now,
   };
