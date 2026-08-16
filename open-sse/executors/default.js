@@ -7,6 +7,7 @@ import { buildClineHeaders } from "../shared/clineAuth.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
+import { resolveCustomHeaders } from "../utils/headerTemplate.js";
 
 // Auth header descriptors — derived from registry transport.auth, fallback to hardcoded defaults.
 const BEARER = { combined: true, header: "Authorization", scheme: "bearer" };
@@ -192,6 +193,24 @@ export class DefaultExecutor extends BaseExecutor {
     }
 
     if (stream) headers["Accept"] = "text/event-stream";
+
+    // Custom request headers (compatible nodes): applied last, override any
+    // preset incl. auth/Accept, case-insensitive. Fail-open: a bad template
+    // must never break the request.
+    const customHeaders = credentials?.providerSpecificData?.customHeaders;
+    if (customHeaders) {
+      try {
+        const resolved = resolveCustomHeaders(customHeaders);
+        for (const [name, value] of Object.entries(resolved)) {
+          const existing = Object.keys(headers).find((k) => k.toLowerCase() === name.toLowerCase());
+          if (existing) delete headers[existing];
+          headers[name] = value;
+        }
+      } catch {
+        /* fail-open */
+      }
+    }
+
     return headers;
   }
 
