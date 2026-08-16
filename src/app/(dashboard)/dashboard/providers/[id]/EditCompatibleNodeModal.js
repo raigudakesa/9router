@@ -2,7 +2,8 @@
 
 import { useState, useEffect } from "react";
 import PropTypes from "prop-types";
-import { Button, Badge, Input, Modal, Select } from "@/shared/components";
+import { Button, Badge, Input, Modal, Select, Tooltip } from "@/shared/components";
+import HeaderFormModal from "./HeaderFormModal";
 
 export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose, isAnthropic }) {
   const [formData, setFormData] = useState({
@@ -17,6 +18,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
   const [checkModelId, setCheckModelId] = useState("");
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
+  const [headerForm, setHeaderForm] = useState({ open: false, mode: "add", index: null });
 
   useEffect(() => {
     if (node) {
@@ -39,11 +41,27 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
   const isInvalidHeaderName = (name) => name.trim() !== "" && !HEADER_NAME_RE.test(name.trim());
   const hasInvalidHeader = customHeaders.some((h) => isInvalidHeaderName(h.name));
 
-  const updateHeader = (index, field, value) => {
-    setCustomHeaders((rows) => rows.map((r, i) => (i === index ? { ...r, [field]: value } : r)));
-  };
-  const addHeader = () => setCustomHeaders((rows) => [...rows, { name: "", value: "" }]);
   const removeHeader = (index) => setCustomHeaders((rows) => rows.filter((_, i) => i !== index));
+
+  const openAddHeader = () => setHeaderForm({ open: true, mode: "add", index: null });
+  const openEditHeader = (index) => setHeaderForm({ open: true, mode: "edit", index });
+  const closeHeaderForm = () => setHeaderForm({ open: false, mode: "add", index: null });
+
+  const submitHeaderForm = (row) => {
+    setCustomHeaders((rows) => {
+      if (headerForm.mode === "edit" && headerForm.index != null) {
+        return rows.map((r, i) => (i === headerForm.index ? row : r));
+      }
+      // add: replace an existing same-name (case-insensitive) row, else append
+      const lower = row.name.toLowerCase();
+      const existingIdx = rows.findIndex((r) => r.name.trim().toLowerCase() === lower);
+      if (existingIdx >= 0) return rows.map((r, i) => (i === existingIdx ? row : r));
+      return [...rows, row];
+    });
+    closeHeaderForm();
+  };
+
+  const formatPersist = (ttl) => (ttl === null || ttl === undefined ? "-" : ttl === 0 ? "Permanent" : `${ttl} min`);
 
   const handleSubmit = async () => {
     if (!formData.name.trim() || !formData.prefix.trim() || !formData.baseUrl.trim() || hasInvalidHeader) return;
@@ -59,7 +77,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
       }
       payload.customHeaders = customHeaders
         .filter((h) => h.name.trim() !== "")
-        .map((h) => ({ name: h.name.trim(), value: h.value }));
+        .map((h) => ({ name: h.name.trim(), value: h.value, ttlMinutes: h.ttlMinutes ?? null }));
       await onSave(payload);
     } finally {
       setSaving(false);
@@ -91,7 +109,7 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
   if (!node) return null;
 
   return (
-    <Modal isOpen={isOpen} title={`Edit ${isAnthropic ? "Anthropic" : "OpenAI"} Compatible`} onClose={onClose}>
+    <Modal isOpen={isOpen} title={`Edit ${isAnthropic ? "Anthropic" : "OpenAI"} Compatible`} onClose={onClose} disableEscape={headerForm.open} closeOnOverlay={!headerForm.open}>
       <div className="flex flex-col gap-4">
         <Input
           label="Name"
@@ -125,41 +143,49 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
             <label className="text-sm font-medium">Request Headers</label>
-            <Button type="button" variant="secondary" onClick={addHeader}>
-              + Add Header
+            <Button type="button" variant="secondary" onClick={openAddHeader}>
+              + Add
             </Button>
           </div>
-          {customHeaders.map((h, i) => (
-            <div key={i} className="flex gap-2 items-start">
-              <Input
-                placeholder="Header-Name"
-                value={h.name}
-                onChange={(e) => updateHeader(i, "name", e.target.value)}
-                className="flex-1"
-                error={isInvalidHeaderName(h.name) ? "Invalid header name" : undefined}
-              />
-              <Input
-                placeholder="value or sess_{ralpha_num:26}"
-                value={h.value}
-                onChange={(e) => updateHeader(i, "value", e.target.value)}
-                className="flex-1"
-              />
-              <div className="pt-1">
-                <Button type="button" variant="ghost" onClick={() => removeHeader(i)}>
-                  ×
-                </Button>
-              </div>
-            </div>
-          ))}
+          <div className="border border-border-subtle rounded-[10px] overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-surface-2 text-text-muted">
+                <tr>
+                  <th className="text-left font-medium px-3 py-2">Name</th>
+                  <th className="text-left font-medium px-3 py-2">Value</th>
+                  <th className="text-left font-medium px-3 py-2">Persist</th>
+                  <th className="text-right font-medium px-3 py-2">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {customHeaders.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="px-3 py-4 text-center text-text-muted">No custom headers</td>
+                  </tr>
+                )}
+                {customHeaders.map((h, i) => (
+                  <tr key={i} className="border-t border-border-subtle">
+                    <td className="px-3 py-2 font-mono">{h.name}</td>
+                    <td className="px-3 py-2 max-w-[180px] truncate" title={h.value}>{h.value}</td>
+                    <td className="px-3 py-2">{formatPersist(h.ttlMinutes)}</td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center justify-end gap-1">
+                        <Tooltip text="Edit" position="top">
+                          <Button type="button" variant="ghost" size="sm" icon="edit" onClick={() => openEditHeader(i)} />
+                        </Tooltip>
+                        <Tooltip text="Delete" position="top">
+                          <Button type="button" variant="ghost" size="sm" icon="delete" onClick={() => removeHeader(i)} />
+                        </Tooltip>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           <p className="text-xs text-neutral-500">
-            Overrides preset headers of the same name. Dynamic tags:
-            {" "}<code>{"{ralpha|lalpha|ualpha|num|symbol[_...][:length]}"}</code> generate random values per request
-            (e.g. <code>{"sess_{ralpha_num:26}"}</code>). Copy another header:
-            {" "}<code>{"{header:Other-Header}"}</code>. Special:
-            {" "}<code>{"{opencode_session}"}</code> generates an opencode-style
-            {" "}<code>ses_</code> session id (not combinable, no length).
-            {" "}Set a value to <code>{"{remove}"}</code> to delete a preset
-            header entirely (nothing sent).
+            Overrides preset headers of the same name. Persist reuses the resolved
+            value per connection (0 minutes = permanent, until restart).
           </p>
         </div>
         <div className="flex gap-2">
@@ -196,6 +222,16 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
             Cancel
           </Button>
         </div>
+        <HeaderFormModal
+          isOpen={headerForm.open}
+          mode={headerForm.mode}
+          initial={headerForm.index != null ? customHeaders[headerForm.index] : null}
+          existingNames={customHeaders
+            .filter((_, i) => i !== headerForm.index)
+            .map((h) => h.name.trim().toLowerCase())}
+          onSubmit={submitHeaderForm}
+          onClose={closeHeaderForm}
+        />
       </div>
     </Modal>
   );
@@ -210,7 +246,7 @@ EditCompatibleNodeModal.propTypes = {
     apiType: PropTypes.string,
     baseUrl: PropTypes.string,
     customHeaders: PropTypes.arrayOf(
-      PropTypes.shape({ name: PropTypes.string, value: PropTypes.string })
+      PropTypes.shape({ name: PropTypes.string, value: PropTypes.string, ttlMinutes: PropTypes.number })
     ),
   }),
   onSave: PropTypes.func.isRequired,
