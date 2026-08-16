@@ -24,6 +24,11 @@ describe("normalizeCustomHeaders", () => {
     expect(error).toBeTruthy();
     expect(headers).toEqual([]);
   });
+  it("rejects CR/LF in header value", () => {
+    const { headers, error } = normalizeCustomHeaders([{ name: "X", value: "foo\r\nX-Injected: bar" }]);
+    expect(error).toBeTruthy();
+    expect(headers).toEqual([]);
+  });
   it("non-array input → none, no error", () => {
     expect(normalizeCustomHeaders(undefined)).toEqual({ headers: [], error: null });
     expect(normalizeCustomHeaders(null)).toEqual({ headers: [], error: null });

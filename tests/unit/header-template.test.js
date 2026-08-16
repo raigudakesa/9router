@@ -109,4 +109,8 @@ describe("resolveCustomHeaders — header refs", () => {
     ]);
     expect(out).toEqual({ Keep: "y" });
   });
+  it("strips CR/LF from resolved value", () => {
+    const out = resolveCustomHeaders([{ name: "X", value: "a\r\nb" }]);
+    expect(out).toEqual({ X: "ab" });
+  });
 });

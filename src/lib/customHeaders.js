@@ -12,6 +12,9 @@ export function normalizeCustomHeaders(input) {
       return { headers: [], error: `Invalid header name: "${name}"` };
     }
     const value = typeof row.value === "string" ? row.value : "";
+    if (/[\r\n]/.test(value)) {
+      return { headers: [], error: `Invalid header value for "${name}"` };
+    }
     byLower.set(name.toLowerCase(), { name, value });
   }
   return { headers: [...byLower.values()], error: null };

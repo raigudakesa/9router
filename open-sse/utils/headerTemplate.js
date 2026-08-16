@@ -88,7 +88,7 @@ export function resolveCustomHeaders(customHeaders) {
   // Pass 2: resolve {header:Name} refs against pass-1 values.
   const out = {};
   for (const { name, value } of pass1) {
-    out[name] = resolveRefs(value, lowerMap, 0);
+    out[name] = resolveRefs(value, lowerMap, 0).replace(/[\r\n]/g, "");
   }
   return out;
 }
