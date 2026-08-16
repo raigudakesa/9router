@@ -1,5 +1,11 @@
 const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
+function normalizeTtl(ttl) {
+  if (ttl === null || ttl === undefined) return null;
+  if (typeof ttl !== "number" || !Number.isInteger(ttl) || ttl < 0) return null;
+  return ttl;
+}
+
 export function normalizeCustomHeaders(input) {
   if (!Array.isArray(input)) return { headers: [], error: null };
 
@@ -15,7 +21,7 @@ export function normalizeCustomHeaders(input) {
     if (/[\r\n]/.test(value)) {
       return { headers: [], error: `Invalid header value for "${name}"` };
     }
-    byLower.set(name.toLowerCase(), { name, value });
+    byLower.set(name.toLowerCase(), { name, value, ttlMinutes: normalizeTtl(row.ttlMinutes) });
   }
   return { headers: [...byLower.values()], error: null };
 }
