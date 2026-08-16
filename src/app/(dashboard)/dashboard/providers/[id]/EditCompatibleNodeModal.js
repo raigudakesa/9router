@@ -155,7 +155,9 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
             Overrides preset headers of the same name. Dynamic tags:
             {" "}<code>{"{ralpha|lalpha|ualpha|num|symbol[_...][:length]}"}</code> generate random values per request
             (e.g. <code>{"sess_{ralpha_num:26}"}</code>). Copy another header:
-            {" "}<code>{"{header:Other-Header}"}</code>.
+            {" "}<code>{"{header:Other-Header}"}</code>. Special:
+            {" "}<code>{"{opencode_session}"}</code> generates an opencode-style
+            {" "}<code>ses_</code> session id (not combinable, no length).
           </p>
         </div>
         <div className="flex gap-2">

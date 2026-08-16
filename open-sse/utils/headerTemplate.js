@@ -22,6 +22,50 @@ function secureRandomInt(max) {
   return x % max;
 }
 
+// --- opencode session id --------------------------------------------------
+// Mirrors anomalyco/opencode's Identifier: create("ses", "descending").
+// Format: "ses_" + 12 hex (descending-encoded Date.now()*0x1000 + counter,
+// 6 big-endian bytes) + 14 base62 random chars = "ses_" + 26 chars.
+// Ref: packages/opencode/src/id/id.ts (LENGTH = 26, prefix session = "ses").
+const OPENCODE_ID_LENGTH = 26;
+const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+// Module-local monotonic counter (matches opencode's per-timestamp counter).
+let ocLastTimestamp = 0;
+let ocCounter = 0;
+
+function randomBase62(length) {
+  const bytes = crypto.randomBytes(length);
+  let result = "";
+  for (let i = 0; i < length; i++) result += BASE62[bytes[i] % 62];
+  return result;
+}
+
+// Generate a fresh opencode-style session id ("ses_...").
+export function generateOpencodeSessionId(timestamp = Date.now()) {
+  if (timestamp !== ocLastTimestamp) {
+    ocLastTimestamp = timestamp;
+    ocCounter = 0;
+  }
+  ocCounter++;
+
+  // descending direction: bit-inverted, so newer ids sort first
+  let now = BigInt(timestamp) * BigInt(0x1000) + BigInt(ocCounter);
+  now = ~now;
+
+  const timeBytes = Buffer.alloc(6);
+  for (let i = 0; i < 6; i++) {
+    timeBytes[i] = Number((now >> BigInt(40 - 8 * i)) & BigInt(0xff));
+  }
+
+  return "ses_" + timeBytes.toString("hex") + randomBase62(OPENCODE_ID_LENGTH - 12);
+}
+
+// Special standalone tokens: exact-match only, not combinable, no length param.
+const SPECIAL_TOKENS = {
+  opencode_session: () => generateOpencodeSessionId(),
+};
+
 // Resolve one {charset[_charset...][:length]} token → string, or null if invalid.
 function resolveDynamicToken(inner, random) {
   const [charsetPart, lengthPart] = inner.split(":");
@@ -49,6 +93,9 @@ export function resolveTemplateValue(value, opts = {}) {
   const random = opts.random || secureRandomInt;
   return value.replace(/\{([^{}:]+(?::\d+)?)\}/g, (match, inner) => {
     if (inner.startsWith("header:")) return match; // header ref handled later
+    // Special standalone tokens (exact match, not combinable, no length).
+    const special = SPECIAL_TOKENS[inner];
+    if (special) return special();
     const resolved = resolveDynamicToken(inner, random);
     return resolved === null ? match : resolved;
   });

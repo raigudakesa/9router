@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveCustomHeaders, resolveTemplateValue } from "open-sse/utils/headerTemplate.js";
+import { resolveCustomHeaders, resolveTemplateValue, generateOpencodeSessionId } from "open-sse/utils/headerTemplate.js";
 
 // Deterministic RNG: always returns 0 → picks first char of any pool.
 const zero = () => 0;
@@ -112,5 +112,46 @@ describe("resolveCustomHeaders — header refs", () => {
   it("strips CR/LF from resolved value", () => {
     const out = resolveCustomHeaders([{ name: "X", value: "a\r\nb" }]);
     expect(out).toEqual({ X: "ab" });
+  });
+});
+
+describe("special token {opencode_session}", () => {
+  // opencode Identifier: "ses_" + 12 hex + 14 base62 = "ses_" + 26 chars.
+  const SES_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
+
+  it("generateOpencodeSessionId matches opencode ses_ format", () => {
+    expect(generateOpencodeSessionId()).toMatch(SES_RE);
+  });
+
+  it("resolves {opencode_session} to a ses_ id", () => {
+    expect(resolveTemplateValue("{opencode_session}")).toMatch(SES_RE);
+  });
+
+  it("resolves inside a larger value", () => {
+    const out = resolveTemplateValue("sid={opencode_session}");
+    expect(out).toMatch(/^sid=ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+  });
+
+  it("is NOT combinable and takes no length (any variation left literal)", () => {
+    // With a length param it is not the special token; falls through to
+    // charset logic where "opencode"/"session" are unknown → left literal.
+    expect(resolveTemplateValue("{opencode_session:5}")).toBe("{opencode_session:5}");
+    // Combined with a real charset is likewise not the special token.
+    expect(resolveTemplateValue("{opencode_session_num}")).toBe("{opencode_session_num}");
+  });
+
+  it("generates a fresh id each call (uniqueness)", () => {
+    const a = generateOpencodeSessionId();
+    const b = generateOpencodeSessionId();
+    expect(a).not.toBe(b);
+  });
+
+  it("works as a full custom header value and can be copied via {header:...}", () => {
+    const out = resolveCustomHeaders([
+      { name: "X-Session", value: "{opencode_session}" },
+      { name: "X-Copy", value: "{header:X-Session}" },
+    ]);
+    expect(out["X-Session"]).toMatch(SES_RE);
+    expect(out["X-Copy"]).toBe(out["X-Session"]);
   });
 });
