@@ -148,13 +148,16 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
             </Button>
           </div>
           <div className="border border-border-subtle rounded-[10px] overflow-hidden">
-            <table className="w-full text-sm">
+            {/* table-fixed keeps columns within the container so the Actions
+                column (Edit/Delete) can never be pushed out of view by a long
+                value or a wide Persist label like "Permanent". */}
+            <table className="w-full text-sm table-fixed">
               <thead className="bg-surface-2 text-text-muted">
                 <tr>
-                  <th className="text-left font-medium px-3 py-2">Name</th>
+                  <th className="text-left font-medium px-3 py-2 w-[28%]">Name</th>
                   <th className="text-left font-medium px-3 py-2">Value</th>
-                  <th className="text-left font-medium px-3 py-2">Persist</th>
-                  <th className="text-right font-medium px-3 py-2">Actions</th>
+                  <th className="text-left font-medium px-3 py-2 w-[92px]">Persist</th>
+                  <th className="text-right font-medium px-3 py-2 w-[96px]">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -165,16 +168,16 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
                 )}
                 {customHeaders.map((h, i) => (
                   <tr key={i} className="border-t border-border-subtle">
-                    <td className="px-3 py-2 font-mono">{h.name}</td>
-                    <td className="px-3 py-2 max-w-[180px] truncate" title={h.value}>{h.value}</td>
-                    <td className="px-3 py-2">{formatPersist(h.ttlMinutes)}</td>
+                    <td className="px-3 py-2 font-mono truncate" title={h.name}>{h.name}</td>
+                    <td className="px-3 py-2 truncate" title={h.value}>{h.value}</td>
+                    <td className="px-3 py-2 truncate">{formatPersist(h.ttlMinutes)}</td>
                     <td className="px-3 py-2">
                       <div className="flex items-center justify-end gap-1">
                         <Tooltip text="Edit" position="top">
-                          <Button type="button" variant="ghost" size="sm" icon="edit" onClick={() => openEditHeader(i)} />
+                          <Button type="button" variant="ghost" size="sm" icon="edit" className="!px-2" onClick={() => openEditHeader(i)} />
                         </Tooltip>
                         <Tooltip text="Delete" position="top">
-                          <Button type="button" variant="ghost" size="sm" icon="delete" onClick={() => removeHeader(i)} />
+                          <Button type="button" variant="ghost" size="sm" icon="delete" className="!px-2" onClick={() => removeHeader(i)} />
                         </Tooltip>
                       </div>
                     </td>
