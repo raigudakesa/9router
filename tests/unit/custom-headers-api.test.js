@@ -83,10 +83,10 @@ describe("customHeaders propagation", () => {
     expect(res.status).toBe(200);
 
     const stored = await ctx.getProviderNodeById(node.id);
-    expect(stored.customHeaders).toEqual([{ name: "User-Agent", value: "chrome" }]);
+    expect(stored.customHeaders).toEqual([{ name: "User-Agent", value: "chrome", ttlMinutes: null }]);
 
     const conns = await ctx.getProviderConnections({ provider: node.id });
-    expect(conns[0].providerSpecificData.customHeaders).toEqual([{ name: "User-Agent", value: "chrome" }]);
+    expect(conns[0].providerSpecificData.customHeaders).toEqual([{ name: "User-Agent", value: "chrome", ttlMinutes: null }]);
   });
 
   it("PUT with invalid header name → 400", async () => {
