@@ -7,7 +7,7 @@ import { buildClineHeaders } from "../shared/clineAuth.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
-import { resolveCustomHeaders } from "../utils/headerTemplate.js";
+import { resolveCustomHeaders, REMOVE_HEADER } from "../utils/headerTemplate.js";
 
 // Auth header descriptors — derived from registry transport.auth, fallback to hardcoded defaults.
 const BEARER = { combined: true, header: "Authorization", scheme: "bearer" };
@@ -204,6 +204,8 @@ export class DefaultExecutor extends BaseExecutor {
         for (const [name, value] of Object.entries(resolved)) {
           const existing = Object.keys(headers).find((k) => k.toLowerCase() === name.toLowerCase());
           if (existing) delete headers[existing];
+          // {remove} directive: drop the preset header entirely, send nothing.
+          if (value === REMOVE_HEADER) continue;
           headers[name] = value;
         }
       } catch {

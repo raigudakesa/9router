@@ -29,6 +29,20 @@ describe("DefaultExecutor buildHeaders — custom headers", () => {
     expect(h[keys[0]]).toBe("Bearer overridden");
   });
 
+  it("{remove} deletes a preset header entirely (case-insensitive, nothing sent)", () => {
+    const ex = new DefaultExecutor("openai-compatible-chat-x");
+    const h = ex.buildHeaders(creds([{ name: "content-type", value: "{remove}" }]), true);
+    const keys = Object.keys(h).filter((k) => k.toLowerCase() === "content-type");
+    expect(keys).toHaveLength(0);
+  });
+
+  it("{remove} on a non-existent header is a no-op (header simply absent)", () => {
+    const ex = new DefaultExecutor("openai-compatible-chat-x");
+    const h = ex.buildHeaders(creds([{ name: "X-Absent", value: "{remove}" }]), true);
+    const keys = Object.keys(h).filter((k) => k.toLowerCase() === "x-absent");
+    expect(keys).toHaveLength(0);
+  });
+
   it("can override Accept (applied after stream Accept line)", () => {
     const ex = new DefaultExecutor("openai-compatible-chat-x");
     const h = ex.buildHeaders(creds([{ name: "Accept", value: "application/json" }]), true);

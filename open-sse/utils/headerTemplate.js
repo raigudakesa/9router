@@ -111,6 +111,10 @@ function resolveRefs(value, lowerMap, depth) {
   });
 }
 
+// Sentinel emitted for a header whose value is the {remove} directive.
+// Consumers (buildHeaders) must delete the header and NOT send it.
+export const REMOVE_HEADER = "\u0000__9R_REMOVE__";
+
 export function resolveCustomHeaders(customHeaders) {
   if (!Array.isArray(customHeaders)) return {};
 
@@ -123,10 +127,16 @@ export function resolveCustomHeaders(customHeaders) {
     byLower.set(name.toLowerCase(), { name, value: typeof h.value === "string" ? h.value : "" });
   }
 
-  // Pass 1: resolve dynamic tags once per header.
+  // Pass 1: resolve dynamic tags once per header. The {remove} directive is
+  // detected on the RAW (trimmed) value and short-circuits to the sentinel.
   const pass1 = [];
   const lowerMap = {};
   for (const { name, value } of byLower.values()) {
+    if (value.trim() === "{remove}") {
+      pass1.push({ name, value: REMOVE_HEADER });
+      lowerMap[name.toLowerCase()] = ""; // a {header:...} ref to a removed header → ""
+      continue;
+    }
     const resolved = resolveTemplateValue(value);
     pass1.push({ name, value: resolved });
     lowerMap[name.toLowerCase()] = resolved;
@@ -135,7 +145,7 @@ export function resolveCustomHeaders(customHeaders) {
   // Pass 2: resolve {header:Name} refs against pass-1 values.
   const out = {};
   for (const { name, value } of pass1) {
-    out[name] = resolveRefs(value, lowerMap, 0).replace(/[\r\n]/g, "");
+    out[name] = value === REMOVE_HEADER ? REMOVE_HEADER : resolveRefs(value, lowerMap, 0).replace(/[\r\n]/g, "");
   }
   return out;
 }

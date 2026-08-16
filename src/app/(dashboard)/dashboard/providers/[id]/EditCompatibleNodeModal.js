@@ -158,6 +158,8 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
             {" "}<code>{"{header:Other-Header}"}</code>. Special:
             {" "}<code>{"{opencode_session}"}</code> generates an opencode-style
             {" "}<code>ses_</code> session id (not combinable, no length).
+            {" "}Set a value to <code>{"{remove}"}</code> to delete a preset
+            header entirely (nothing sent).
           </p>
         </div>
         <div className="flex gap-2">

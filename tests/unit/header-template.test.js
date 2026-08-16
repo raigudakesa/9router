@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveCustomHeaders, resolveTemplateValue, generateOpencodeSessionId } from "open-sse/utils/headerTemplate.js";
+import { resolveCustomHeaders, resolveTemplateValue, generateOpencodeSessionId, REMOVE_HEADER } from "open-sse/utils/headerTemplate.js";
 
 // Deterministic RNG: always returns 0 → picks first char of any pool.
 const zero = () => 0;
@@ -153,5 +153,33 @@ describe("special token {opencode_session}", () => {
     ]);
     expect(out["X-Session"]).toMatch(SES_RE);
     expect(out["X-Copy"]).toBe(out["X-Session"]);
+  });
+});
+
+describe("{remove} directive", () => {
+  it("emits the REMOVE_HEADER sentinel for value {remove}", () => {
+    const out = resolveCustomHeaders([{ name: "User-Agent", value: "{remove}" }]);
+    expect(out["User-Agent"]).toBe(REMOVE_HEADER);
+  });
+
+  it("tolerates surrounding whitespace", () => {
+    const out = resolveCustomHeaders([{ name: "X-App", value: "  {remove}  " }]);
+    expect(out["X-App"]).toBe(REMOVE_HEADER);
+  });
+
+  it("only exact {remove} triggers removal (embedded text is literal-ish)", () => {
+    // "{remove}" with extra text is not the directive; {remove} is an unknown
+    // charset tag so it is left literal by the resolver.
+    const out = resolveCustomHeaders([{ name: "X", value: "pre {remove}" }]);
+    expect(out["X"]).toBe("pre {remove}");
+  });
+
+  it("a {header:...} ref to a removed header resolves to empty string", () => {
+    const out = resolveCustomHeaders([
+      { name: "A", value: "{remove}" },
+      { name: "B", value: "x{header:A}y" },
+    ]);
+    expect(out["A"]).toBe(REMOVE_HEADER);
+    expect(out["B"]).toBe("xy");
   });
 });
