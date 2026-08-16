@@ -183,3 +183,59 @@ describe("{remove} directive", () => {
     expect(out["B"]).toBe("xy");
   });
 });
+
+describe("resolveCustomHeaders — resolveValue hook", () => {
+  it("no hook → behaves like default", () => {
+    const out = resolveCustomHeaders([{ name: "X", value: "abc" }]);
+    expect(out).toEqual({ X: "abc" });
+  });
+
+  it("hook is called once per header with (name, rawValue, defaultResolve)", () => {
+    const calls = [];
+    const out = resolveCustomHeaders(
+      [{ name: "X-A", value: "raw-a" }, { name: "X-B", value: "raw-b" }],
+      {
+        resolveValue: (name, rawValue, defaultResolve) => {
+          calls.push([name, rawValue]);
+          return `wrapped(${defaultResolve()})`;
+        },
+      }
+    );
+    expect(calls).toEqual([["X-A", "raw-a"], ["X-B", "raw-b"]]);
+    expect(out).toEqual({ "X-A": "wrapped(raw-a)", "X-B": "wrapped(raw-b)" });
+  });
+
+  it("hook can memoize (same value across two resolves)", () => {
+    let n = 0;
+    const memo = {};
+    const hook = (name, rawValue, defaultResolve) => {
+      const key = name + rawValue;
+      if (!(key in memo)) memo[key] = defaultResolve() + ++n;
+      return memo[key];
+    };
+    const a = resolveCustomHeaders([{ name: "S", value: "x" }], { resolveValue: hook });
+    const b = resolveCustomHeaders([{ name: "S", value: "x" }], { resolveValue: hook });
+    expect(a["S"]).toBe(b["S"]);
+  });
+
+  it("{remove} short-circuits BEFORE the hook (never wrapped, never cached)", () => {
+    let called = false;
+    const out = resolveCustomHeaders(
+      [{ name: "User-Agent", value: "{remove}" }],
+      { resolveValue: () => { called = true; return "SHOULD_NOT"; } }
+    );
+    expect(called).toBe(false);
+    expect(out["User-Agent"]).toBe(REMOVE_HEADER);
+  });
+
+  it("{header:X} ref copies the hook-resolved (e.g. memoized) value of its source", () => {
+    const hook = (name, rawValue, defaultResolve) =>
+      name === "X-Session" ? "STABLE" : defaultResolve();
+    const out = resolveCustomHeaders(
+      [{ name: "X-Session", value: "{ralpha_num:26}" }, { name: "X-Copy", value: "{header:X-Session}" }],
+      { resolveValue: hook }
+    );
+    expect(out["X-Session"]).toBe("STABLE");
+    expect(out["X-Copy"]).toBe("STABLE");
+  });
+});

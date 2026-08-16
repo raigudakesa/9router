@@ -115,7 +115,7 @@ function resolveRefs(value, lowerMap, depth) {
 // Consumers (buildHeaders) must delete the header and NOT send it.
 export const REMOVE_HEADER = "\u0000__9R_REMOVE__";
 
-export function resolveCustomHeaders(customHeaders) {
+export function resolveCustomHeaders(customHeaders, { resolveValue } = {}) {
   if (!Array.isArray(customHeaders)) return {};
 
   // Dedup by case-insensitive name, last wins; skip empty names.
@@ -137,7 +137,8 @@ export function resolveCustomHeaders(customHeaders) {
       lowerMap[name.toLowerCase()] = ""; // a {header:...} ref to a removed header → ""
       continue;
     }
-    const resolved = resolveTemplateValue(value);
+    const defaultResolve = () => resolveTemplateValue(value);
+    const resolved = resolveValue ? resolveValue(name, value, defaultResolve) : defaultResolve();
     pass1.push({ name, value: resolved });
     lowerMap[name.toLowerCase()] = resolved;
   }
