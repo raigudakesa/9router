@@ -52,9 +52,11 @@ describe("DefaultExecutor buildHeaders — custom headers", () => {
 
   it("fail-open: a resolver throw leaves base headers intact", () => {
     const ex = new DefaultExecutor("openai-compatible-chat-x");
-    // customHeaders not an array-of-objects in a shape the resolver can throw on:
-    // pass a getter that throws when iterated.
-    const bad = { get length() { throw new Error("boom"); } };
+    // An array whose element access throws → forces resolveCustomHeaders to throw
+    // inside buildHeaders' try, exercising the fail-open catch.
+    const bad = [];
+    Object.defineProperty(bad, 0, { enumerable: true, get() { throw new Error("boom"); } });
+    bad.length = 1;
     const h = ex.buildHeaders(creds(bad), true);
     expect(h["Content-Type"]).toBe("application/json");
     expect(h.Authorization).toBe("Bearer sk-test");
