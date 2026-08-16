@@ -84,5 +84,8 @@ graphify-out/*
 .repo/
 .script/
 .codegraph/
+.playwright-mcp/
+.superpowers/
+.vscode/
 .PR/
 .next-analyze/*
