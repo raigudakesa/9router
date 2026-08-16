@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { DefaultExecutor } from "open-sse/executors/default.js";
+import { __clearHeaderCache } from "open-sse/utils/headerCache.js";
+import { beforeEach } from "vitest";
+beforeEach(() => __clearHeaderCache());
 
 const BASE = "https://api.example.com/v1";
 function creds(customHeaders, extra = {}) {
@@ -74,5 +77,31 @@ describe("DefaultExecutor buildHeaders — custom headers", () => {
     const h = ex.buildHeaders(creds(bad), true);
     expect(h["Content-Type"]).toBe("application/json");
     expect(h.Authorization).toBe("Bearer sk-test");
+  });
+});
+
+describe("DefaultExecutor buildHeaders — persistence", () => {
+  it("persistent header (ttlMinutes 0) is identical across two calls, same connection", () => {
+    const ex = new DefaultExecutor("openai-compatible-chat-x");
+    const c = creds([{ name: "X-Session", value: "{ralpha_num:26}", ttlMinutes: 0 }], { connectionId: "conn-1" });
+    const h1 = ex.buildHeaders(c, true);
+    const h2 = ex.buildHeaders(c, true);
+    expect(h1["X-Session"]).toMatch(/^[a-zA-Z0-9]{26}$/);
+    expect(h2["X-Session"]).toBe(h1["X-Session"]);
+  });
+
+  it("non-persistent header (no ttlMinutes) varies across calls", () => {
+    const ex = new DefaultExecutor("openai-compatible-chat-x");
+    const c = creds([{ name: "X-Session", value: "{ralpha_num:26}" }], { connectionId: "conn-1" });
+    const a = ex.buildHeaders(c, true)["X-Session"];
+    const b = ex.buildHeaders(c, true)["X-Session"];
+    expect(a).not.toBe(b); // 26 random chars colliding is effectively impossible
+  });
+
+  it("different connectionId → different persistent value", () => {
+    const ex = new DefaultExecutor("openai-compatible-chat-x");
+    const h1 = ex.buildHeaders(creds([{ name: "X-Session", value: "{ralpha_num:26}", ttlMinutes: 0 }], { connectionId: "conn-1" }), true);
+    const h2 = ex.buildHeaders(creds([{ name: "X-Session", value: "{ralpha_num:26}", ttlMinutes: 0 }], { connectionId: "conn-2" }), true);
+    expect(h2["X-Session"]).not.toBe(h1["X-Session"]);
   });
 });
