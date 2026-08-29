@@ -6,6 +6,16 @@
 //   3. PATTERN_CAPABILITIES                     — glob match, ordered specific -> generic
 //   4. DEFAULT_CAPABILITIES                     — safe floor (always returned)
 //
+// Two extra layers then refine the result, and neither can override the hand
+// written tables above (steps 1-2 short-circuit before they are consulted):
+//   • the synced catalog — modalities keyed by model, limits keyed by provider
+//     + model, refreshed from models.dev in the background. It reads a file, so
+//     the server installs it via setCatalogSource(); this module stays free of
+//     node:fs because the dashboard bundles it into the browser too.
+//   • visionPatterns.js — name-based vision detection, last resort so a model
+//     nobody has catalogued yet still accepts images.
+// Both only ever turn a capability ON.
+//
 // ── HOW TO ADD / UPDATE A MODEL ──────────────────────────────────────
 // Authoritative data source: https://models.dev/api.json (145 providers, 4000+
 // models, MIT). Each model exposes the exact fields we map below:
@@ -24,6 +34,7 @@
 
 import { matchPattern } from "./pricing.js";
 import { getCustomModelCapsOverride } from "./customModelCaps.js";
+import { looksLikeVisionModel } from "./visionPatterns.js";
 
 /**
  * Safe floor — every resolved result is merged over this so consumers
@@ -47,6 +58,7 @@ export const DEFAULT_CAPABILITIES = {
   thinkingFormat: null,
   thinkingCanDisable: true,  // false → model cannot turn thinking off (clamp to min instead of disable)
   thinkingRange: null,       // { min, max } for budget formats; null = no clamp
+  thinkingEffortSupported: false, // zai format only: model accepts a reasoning_effort level (GLM-5.2+; older GLM ignores it)
   // limits (tokens)
   contextWindow: 200000,
   maxOutput: 64000,
@@ -114,8 +126,14 @@ export const MODEL_CAPABILITIES = {
   // Gemini image-gen / OpenAI image / xai image variants
   "gpt-image-1":       { imageOutput: true, tools: false },
 
-  // GLM vision variant (text GLM has no vision)
-  "glm-4.6v":          { vision: true, reasoning: true, thinkingFormat: "zai", contextWindow: 128000 },
+  // GLM vision variants (text GLM has no vision) — 5.3-Flash and 5V-Turbo are
+  // natively multimodal per z.ai, and 5.3-Flash carries the full 1M window.
+  "glm-5.3-flash":     { vision: true, videoInput: true, pdf: true, reasoning: true, thinkingFormat: "zai", contextWindow: 1000000, maxOutput: 131072 },
+  "glm-4.6v":          { vision: true, videoInput: true, reasoning: true, thinkingFormat: "zai", contextWindow: 128000, maxOutput: 32768 },
+  "glm-4.5v":          { vision: true, videoInput: true, reasoning: true, thinkingFormat: "zai", contextWindow: 64000, maxOutput: 16384 },
+
+  // DeepSeek's first V4 model with image input; text limits match V4-Flash.
+  "deepseek-v4-flash-vision-exp": { vision: true, reasoning: true, thinkingFormat: "deepseek", contextWindow: 1000000, maxOutput: 384000 },
 
   // Qwen plain coder/text (no vision) — registry "vision-model" / "coder-model" aliases
   "vision-model":      { vision: true, reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000 },
@@ -128,6 +146,8 @@ export const MODEL_CAPABILITIES = {
   "kimi-for-coding-highspeed": { vision: true, videoInput: true, reasoning: true, thinkingFormat: "kimi", thinkingCanDisable: false, contextWindow: 262144, maxOutput: 65536 },
   "kimi-k2.7-code":    { vision: true, videoInput: true, reasoning: true, thinkingFormat: "kimi", thinkingCanDisable: false, contextWindow: 262144, maxOutput: 65536 },
   "kimi-k2.7-code-highspeed": { vision: true, videoInput: true, reasoning: true, thinkingFormat: "kimi", thinkingCanDisable: false, contextWindow: 262144, maxOutput: 65536 },
+  // OpenCode Free Muse Spark — OpenAI Responses reasoning supports up to xhigh.
+  "muse-spark-1.2-contributor-free": { reasoning: true, thinkingFormat: "openai", contextWindow: 1048576, maxOutput: 131072 },
 };
 
 const KIRO_GPT_5_6_CAPABILITIES = { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 272000, maxOutput: 128000 };
@@ -254,6 +274,8 @@ export const PATTERN_CAPABILITIES = [
   // ── Grok (vision + Live Search) ──────────────────────────────────
   { pattern: "*grok*image*",    caps: { imageOutput: true } },
   { pattern: "*grok-code*",     caps: { reasoning: true, thinkingFormat: "openai", contextWindow: 256000 } },
+  // Grok 4.6: 500k context, no text output limit (docs.x.ai/developers/grok-4-6)
+  { pattern: "*grok-4.6*",      caps: { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 500000, maxOutput: 500000 } },
   // Grok 4.5 (Grok CLI / Grok Build): 500k context per cli-chat-proxy /v1/models
   { pattern: "*grok-4.5*",      caps: { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 500000, maxOutput: 64000 } },
   { pattern: "*grok-4*",        caps: { vision: true, reasoning: true, search: true, thinkingFormat: "openai", contextWindow: 256000 } },
@@ -281,6 +303,10 @@ export const PATTERN_CAPABILITIES = [
   { pattern: "*kimi*",          caps: { reasoning: true, thinkingFormat: "kimi", contextWindow: 262144 } },
 
   // ── GLM / Z.ai (thinking.enabled; disable via enable_thinking:false) ─
+  // reasoning_effort is only read by z.ai from GLM-5.2 onward (docs.z.ai/guides/capabilities/thinking) —
+  // older GLM (4.x, 5.0, 5.1, 5-turbo, 5v-turbo) ignore it, so gate it per exact version, not the "*glm-5*" catch-all.
+  { pattern: "*glm-5.3*",       caps: { reasoning: true, thinkingFormat: "zai", thinkingEffortSupported: true, contextWindow: 200000, maxOutput: 128000 } },
+  { pattern: "*glm-5.2*",       caps: { reasoning: true, thinkingFormat: "zai", thinkingEffortSupported: true, contextWindow: 200000, maxOutput: 128000 } },
   { pattern: "*glm-5*",         caps: { reasoning: true, thinkingFormat: "zai", contextWindow: 200000, maxOutput: 128000 } },
   { pattern: "*glm-4.7*",       caps: { reasoning: true, thinkingFormat: "zai", contextWindow: 200000, maxOutput: 128000 } },
   { pattern: "*glm-4*",         caps: { reasoning: true, thinkingFormat: "zai", contextWindow: 200000 } },
@@ -358,6 +384,48 @@ export function isCustomNodeProviderId(provider) {
  * @param {string} model
  * @returns {object} full capabilities object
  */
+const MODALITY_KEYS = ["vision", "pdf", "audioInput", "videoInput"];
+
+// Catalog lookups, installed by the server at startup. Left as no-ops in the
+// browser bundle, where there is no file to read.
+let catalogSource = null;
+
+/**
+ * Install the synced catalog reader (server only).
+ * @param {{ getModalities: Function, getLimits: Function } | null} source
+ */
+export function setCatalogSource(source) {
+  catalogSource = source;
+}
+
+// Apply the synced catalog + name heuristic on top of a table-resolved result,
+// then overlay user-declared custom-model overrides. Strictly additive for the
+// catalog: a capability already true stays true, and a false one only flips
+// when an outside source positively declares support. Overrides (ov) win over
+// everything because the user explicitly declared what their model supports.
+function refine(base, provider, model, ov) {
+  const result = { ...DEFAULT_CAPABILITIES, ...base, ...ov };
+
+  if (catalogSource) {
+    const modalities = catalogSource.getModalities(model);
+    if (modalities) {
+      for (const key of MODALITY_KEYS) {
+        if (modalities[key] === true) result[key] = true;
+      }
+    }
+
+    const limits = catalogSource.getLimits(provider, model);
+    if (limits) {
+      if (limits.contextWindow > 0) result.contextWindow = limits.contextWindow;
+      if (limits.maxOutput > 0) result.maxOutput = limits.maxOutput;
+    }
+  }
+
+  if (!result.vision && looksLikeVisionModel(model)) result.vision = true;
+
+  return result;
+}
+
 export function getCapabilitiesForModel(provider, model, overrides = null) {
   // User-set custom-model overrides win over registry-derived caps: the user has
   // explicitly declared what their model supports, so apply them last (on top).
@@ -372,8 +440,8 @@ export function getCapabilitiesForModel(provider, model, overrides = null) {
   // 1. Provider-specific override
   if (provider) {
     const providerCaps = PROVIDER_CAPABILITIES[provider];
-    if (providerCaps?.[model]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[model], ...ov };
-    if (providerCaps?.[baseModel]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[baseModel], ...ov };
+    if (providerCaps?.[model]) return refine(providerCaps[model], provider, model, ov);
+    if (providerCaps?.[baseModel]) return refine(providerCaps[baseModel], provider, model, ov);
   }
 
   // 2. Canonical exact. Skipped for custom compatible nodes — the canonical table
@@ -381,8 +449,8 @@ export function getCapabilitiesForModel(provider, model, overrides = null) {
   //     A same-named model on a custom node only has the caps the user declared.
   const customNode = isCustomNodeProviderId(provider);
   if (!customNode) {
-    if (MODEL_CAPABILITIES[baseModel]) return { ...DEFAULT_CAPABILITIES, ...MODEL_CAPABILITIES[baseModel], ...ov };
-    if (MODEL_CAPABILITIES[model]) return { ...DEFAULT_CAPABILITIES, ...MODEL_CAPABILITIES[model], ...ov };
+    if (MODEL_CAPABILITIES[baseModel]) return refine(MODEL_CAPABILITIES[baseModel], provider, model, ov);
+    if (MODEL_CAPABILITIES[model]) return refine(MODEL_CAPABILITIES[model], provider, model, ov);
   }
 
   // 3. Pattern match (first match wins). Skipped for custom compatible nodes —
@@ -393,11 +461,11 @@ export function getCapabilitiesForModel(provider, model, overrides = null) {
   if (!customNode) {
     for (const { pattern, caps } of PATTERN_CAPABILITIES) {
       if (matchPattern(pattern, baseModel) || matchPattern(pattern, model)) {
-        return { ...DEFAULT_CAPABILITIES, ...caps, ...ov };
+        return refine(caps, provider, model, ov);
       }
     }
   }
 
   // 4. Floor (custom/unknown model: only user overrides lift it above text-only)
-  return { ...DEFAULT_CAPABILITIES, ...ov };
+  return refine(null, provider, model, ov);
 }
