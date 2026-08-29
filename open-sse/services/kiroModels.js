@@ -33,6 +33,15 @@ const DEFAULT_REGION = "us-east-1";
 const FETCH_TIMEOUT_MS = 30_000;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes per credential
 
+// Regions where the Amazon Q Developer *profile* is currently hosted (AWS docs:
+// "Supported Regions for the Q Developer console and Q Developer profile").
+// The runtime/profile region is distinct from the IdC/OIDC token region.
+const KIRO_PROFILE_REGIONS = new Set(["us-east-1", "eu-central-1"]);
+
+// Canonical AWS region shape. Guards against SSRF via region injection: the
+// value is interpolated into the upstream runtime host.
+const AWS_REGION_PATTERN = /^[a-z]{2}-[a-z]+-\d{1,2}$/;
+
 /** @type {Map<string, { expiresAt: number, models: any[] }>} */
 const catalogCache = new Map();
 
@@ -57,6 +66,38 @@ function regionFromProfileArn(profileArn) {
   const parts = profileArn.split(":");
   if (parts.length >= 4 && parts[3]) return parts[3];
   return DEFAULT_REGION;
+}
+
+/**
+ * Resolve the RUNTIME region for CodeWhisperer / Amazon Q calls.
+ *
+ * The runtime region is the region of the Amazon Q Developer profile (embedded
+ * in the profileArn), NOT the IdC/OIDC token region. Priority:
+ *   1. The region embedded in the `profileArn` — authoritative, this is where
+ *      the Q Developer profile (and thus the runtime) actually lives.
+ *   2. A stored region ONLY when it is a valid Q Developer profile region
+ *      (us-east-1 / eu-central-1). A stored IdC region that is not a Q profile
+ *      region (e.g. eu-north-1) is deliberately IGNORED for runtime — it is a
+ *      token/OIDC region, not a runtime region.
+ *   3. us-east-1 (CodeWhisperer home region) as the final fallback.
+ */
+function resolveKiroRuntimeRegion(providerSpecificData) {
+  const psd = providerSpecificData || {};
+  const arnRegion = regionFromProfileArn(psd.profileArn);
+  if (arnRegion !== DEFAULT_REGION) return arnRegion;
+
+  const stored = typeof psd.region === "string" ? psd.region.trim().toLowerCase() : "";
+  if (stored && KIRO_PROFILE_REGIONS.has(stored) && AWS_REGION_PATTERN.test(stored)) {
+    return stored;
+  }
+  return DEFAULT_REGION;
+}
+
+/** CodeWhisperer / Amazon Q runtime host for a region. */
+function kiroRuntimeHost(region) {
+  return region === "us-east-1"
+    ? "https://codewhisperer.us-east-1.amazonaws.com"
+    : `https://q.${region}.amazonaws.com`;
 }
 
 /**
@@ -155,49 +196,86 @@ function formatDisplayName(modelName, modelId, rateMultiplier) {
 /**
  * Fetch the raw model catalog from Kiro. Returns the array under `.models`
  * from the API response, or throws on network/HTTP error.
+ *
+ * Tries the region-matched Amazon Q host first, then a us-east-1 home-region
+ * fallback (CodeWhisperer's canonical region) so discovery still works when a
+ * stored region is valid for OIDC but has no Q Developer profile.
  */
 async function fetchKiroCatalogRaw(credentials, signal) {
-  const profileArn = credentials?.providerSpecificData?.profileArn || "";
-  const region = regionFromProfileArn(profileArn);
+  const psd = credentials?.providerSpecificData || {};
+  const profileArn = psd.profileArn || "";
+  const region = resolveKiroRuntimeRegion(psd);
+
+  // SSRF guard: the region is interpolated into the upstream host. Reject
+  // anything that is not a canonical AWS region before building the URL.
+  if (!AWS_REGION_PATTERN.test(region)) {
+    throw new Error(`Kiro runtime region "${region}" is not a valid AWS region`);
+  }
+
   const params = new URLSearchParams();
   params.set("origin", "AI_EDITOR");
   if (profileArn) params.set("profileArn", profileArn);
-  const url = `https://q.${region}.amazonaws.com/ListAvailableModels?${params.toString()}`;
+
+  // Ordered endpoints: region-matched host first, then us-east-1 fallback.
+  const endpoints = [
+    `${kiroRuntimeHost(region)}/ListAvailableModels?${params.toString()}`,
+  ];
+  if (region !== "us-east-1") {
+    endpoints.push(`${kiroRuntimeHost("us-east-1")}/ListAvailableModels?${params.toString()}`);
+  }
 
   const headers = {
     ...buildKiroFingerprintHeaders(credentials),
     "Authorization": `Bearer ${credentials?.accessToken || ""}`
   };
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort("timeout"), FETCH_TIMEOUT_MS);
-  // Forward outer cancellation if any.
-  if (signal && typeof signal.addEventListener === "function") {
-    signal.addEventListener("abort", () => controller.abort(signal.reason));
+  let lastError;
+  for (const url of endpoints) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort("timeout"), FETCH_TIMEOUT_MS);
+    const onAbort = () => controller.abort(signal?.reason);
+    if (signal && typeof signal.addEventListener === "function") {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "GET",
+        headers,
+        signal: controller.signal
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      if (signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onAbort);
+      }
+      lastError = err;
+      continue;
+    } finally {
+      clearTimeout(timer);
+      if (signal && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onAbort);
+      }
+    }
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      // A 401 on the region-matched host could be a profile/region mismatch —
+      // give the fallback endpoint a chance before surfacing the error.
+      lastError = new Error(`Kiro ListAvailableModels ${response.status}: ${text || response.statusText}`);
+      lastError.status = response.status;
+      lastError.body = text;
+      if (response.status !== 401 && response.status !== 403) throw lastError;
+      continue;
+    }
+
+    const data = await response.json();
+    const models = Array.isArray(data?.models) ? data.models : [];
+    return models;
   }
 
-  let response;
-  try {
-    response = await fetch(url, {
-      method: "GET",
-      headers,
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    const err = new Error(`Kiro ListAvailableModels ${response.status}: ${text || response.statusText}`);
-    err.status = response.status;
-    err.body = text;
-    throw err;
-  }
-
-  const data = await response.json();
-  const models = Array.isArray(data?.models) ? data.models : [];
-  return models;
+  throw lastError || new Error("Kiro ListAvailableModels failed on all endpoints");
 }
 
 /**

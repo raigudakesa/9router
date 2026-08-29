@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import PropTypes from "prop-types";
-import { Card, Button, Input, Modal, CardSkeleton, Toggle, ConfirmModal } from "@/shared/components";
+import { Card, Button, Input, Modal, CardSkeleton, Toggle, ConfirmModal, Select } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import {
   TUNNEL_BENEFITS,
@@ -24,6 +24,22 @@ export default function APIPageClient({ machineId }) {
   const [newKeyName, setNewKeyName] = useState("");
   const [createdKey, setCreatedKey] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
+
+  // Per-key model allow-list + expiry
+  const [editingKey, setEditingKey] = useState(null);
+  const [keyForm, setKeyForm] = useState({ name: "", allowedModels: null, expiresAt: null });
+  const [allModels, setAllModels] = useState([]);
+  const [combos, setCombos] = useState([]);
+  const [keyPresets, setKeyPresets] = useState([]);
+  const [presetName, setPresetName] = useState("");
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [modelSearch, setModelSearch] = useState("");
+  const [showPresetMenu, setShowPresetMenu] = useState(false);
+  // Separate preset manager modal (independent from the create/edit key form)
+  const [showPresetModal, setShowPresetModal] = useState(false);
+  const [presetDraft, setPresetDraft] = useState([]);
+  const [presetSearch, setPresetSearch] = useState("");
+  const [editingPresetId, setEditingPresetId] = useState(null);
 
   const [requireApiKey, setRequireApiKey] = useState(false);
   const [requireLogin, setRequireLogin] = useState(true);
@@ -100,6 +116,7 @@ export default function APIPageClient({ machineId }) {
   useEffect(() => {
     fetchData();
     loadSettings();
+    loadModelsAndPresets();
   }, []);
 
   // Status poll: only while degraded (not yet reachable). Stop once healthy to avoid spam.
@@ -274,7 +291,7 @@ export default function APIPageClient({ machineId }) {
           if (createRes.ok) existing = await fetchKeys();
         } catch { /* fall through to empty render */ }
       }
-      setKeys(existing);
+      setKeys(existing.map((k) => ({ ...k, expired: !!k.expiresAt && new Date(k.expiresAt).getTime() < Date.now() })));
     } catch (error) {
       console.log("Error fetching data:", error);
     } finally {
@@ -622,14 +639,99 @@ export default function APIPageClient({ machineId }) {
     }
   };
 
+  const loadModelsAndPresets = async () => {
+    try {
+      const [modelsRes, combosRes, presetsRes] = await Promise.all([
+        fetch("/api/models", { cache: "no-store" }),
+        fetch("/api/combos", { cache: "no-store" }),
+        fetch("/api/key-presets", { cache: "no-store" }),
+      ]);
+      if (modelsRes.ok) {
+        const data = await modelsRes.json();
+        // Dedup by the same key used for checkboxes (routedModel/fullModel/provider+model).
+        const seen = new Set();
+        const unique = [];
+        for (const m of data.models || []) {
+          if (!m?.model) continue;
+          const key = m.routedModel || m.fullModel || `${m.provider}/${m.model}`;
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          unique.push(m);
+        }
+        setAllModels(unique);
+      }
+      if (combosRes.ok) {
+        const data = await combosRes.json();
+        setCombos(data.combos || []);
+      }
+      if (presetsRes.ok) {
+        const data = await presetsRes.json();
+        setKeyPresets(data.presets || []);
+      }
+    } catch (error) {
+      console.log("Error loading models/presets:", error);
+    }
+  };
+
+  // Opens the create-key modal with an optional preset pre-applied.
+  const openCreateModal = (presetId) => {
+    setEditingKey(null);
+    setKeyForm({ name: "", allowedModels: null, expiresAt: null });
+    setPresetName("");
+    setShowAddModal(true);
+    if (presetId) applyPresetById(presetId);
+  };
+
+  const openEditModal = (key) => {
+    setEditingKey(key);
+    setKeyForm({
+      name: key.name || "",
+      allowedModels: Array.isArray(key.allowedModels) ? [...key.allowedModels] : null,
+      expiresAt: key.expiresAt || null,
+    });
+    setPresetName("");
+    setShowAddModal(true);
+  };
+
+  const resetKeyModal = () => {
+    setShowAddModal(false);
+    setEditingKey(null);
+    setKeyForm({ name: "", allowedModels: null, expiresAt: null });
+    setNewKeyName("");
+    setPresetName("");
+    setModelSearch("");
+  };
+
   const handleCreateKey = async () => {
-    if (!newKeyName.trim()) return;
+    const name = (editingKey ? keyForm.name : newKeyName).trim();
+    if (!name) return;
 
     try {
+      if (editingKey) {
+        const res = await fetch(`/api/keys/${editingKey.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name,
+            allowedModels: keyForm.allowedModels,
+            expiresAt: keyForm.expiresAt,
+          }),
+        });
+        if (res.ok) {
+          await fetchData();
+          resetKeyModal();
+        }
+        return;
+      }
+
       const res = await fetch("/api/keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newKeyName }),
+        body: JSON.stringify({
+          name,
+          allowedModels: keyForm.allowedModels,
+          expiresAt: keyForm.expiresAt,
+        }),
       });
       const data = await res.json();
 
@@ -637,11 +739,126 @@ export default function APIPageClient({ machineId }) {
         setCreatedKey(data.key);
         await fetchData();
         setNewKeyName("");
+        setKeyForm({ name: "", allowedModels: null, expiresAt: null });
         setShowAddModal(false);
       }
     } catch (error) {
-      console.log("Error creating key:", error);
+      console.log("Error saving key:", error);
     }
+  };
+
+  const openPresetModal = () => {
+    setEditingPresetId(null);
+    setPresetName("");
+    setPresetDraft([]);
+    setPresetSearch("");
+    setShowPresetMenu(false);
+    setShowPresetModal(true);
+  };
+
+  const openEditPresetModal = (preset) => {
+    setEditingPresetId(preset.id);
+    setPresetName(preset.name || "");
+    setPresetDraft(Array.isArray(preset.models) ? [...preset.models] : []);
+    setPresetSearch("");
+    setShowPresetMenu(false);
+    setShowPresetModal(true);
+  };
+
+  const closePresetModal = () => {
+    setShowPresetModal(false);
+    setEditingPresetId(null);
+    setPresetName("");
+    setPresetDraft([]);
+    setPresetSearch("");
+  };
+
+  const handleSavePreset = async () => {
+    const models = presetDraft;
+    if (models.length === 0) return;
+    const name = presetName.trim();
+    if (!name) return;
+    setSavingPreset(true);
+    try {
+      const isEdit = !!editingPresetId;
+      const res = await fetch(isEdit ? `/api/key-presets/${editingPresetId}` : "/api/key-presets", {
+        method: isEdit ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, models }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (isEdit) {
+          setKeyPresets((prev) => prev.map((p) => (p.id === editingPresetId ? data.preset : p)));
+        } else {
+          setKeyPresets((prev) => [...prev, data.preset]);
+        }
+        setPresetName("");
+        setPresetDraft([]);
+        setPresetSearch("");
+        setEditingPresetId(null);
+      }
+    } catch (error) {
+      console.log("Error saving preset:", error);
+    } finally {
+      setSavingPreset(false);
+    }
+  };
+
+  const togglePresetModel = (modelKey) => {
+    setPresetDraft((prev) => {
+      const current = [...prev];
+      const idx = current.indexOf(modelKey);
+      if (idx !== -1) current.splice(idx, 1);
+      else current.push(modelKey);
+      return current;
+    });
+  };
+
+  const handleDeletePreset = async (id) => {
+    setConfirmState({
+      title: "Delete Preset",
+      message: "Delete this preset? Existing API keys are not affected.",
+      onConfirm: async () => {
+        setConfirmState(null);
+        try {
+          const res = await fetch(`/api/key-presets/${id}`, { method: "DELETE" });
+          if (res.ok) {
+            setKeyPresets((prev) => prev.filter((p) => p.id !== id));
+          }
+        } catch (error) {
+          console.log("Error deleting preset:", error);
+        }
+      },
+    });
+  };
+
+  const applyPreset = (preset) => {
+    if (!preset) {
+      setKeyForm((prev) => ({ ...prev, allowedModels: null }));
+      return;
+    }
+    setKeyForm((prev) => ({ ...prev, allowedModels: Array.isArray(preset.models) ? [...preset.models] : [] }));
+  };
+
+  const toggleAllowedModel = (modelKey) => {
+    setKeyForm((prev) => {
+      const current = Array.isArray(prev.allowedModels) ? [...prev.allowedModels] : [];
+      const idx = current.indexOf(modelKey);
+      if (idx !== -1) current.splice(idx, 1);
+      else current.push(modelKey);
+      return { ...prev, allowedModels: current.length > 0 ? current : null };
+    });
+  };
+
+  const applyPresetById = (presetId) => {
+    const preset = keyPresets.find((p) => p.id === presetId);
+    if (preset) {
+      applyPreset(preset);
+    } else {
+      setKeyForm((prev) => ({ ...prev, allowedModels: null }));
+    }
+    setShowPresetMenu(false);
   };
 
   const handleDeleteKey = async (id) => {
@@ -970,9 +1187,63 @@ export default function APIPageClient({ machineId }) {
             <span className="material-symbols-outlined text-primary">vpn_key</span>
             API Keys
           </h2>
-          <Button icon="add" onClick={() => setShowAddModal(true)}>
-            Create Key
-          </Button>
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Button
+                icon="bookmark"
+                variant="secondary"
+                onClick={() => setShowPresetMenu((v) => !v)}
+              >
+                Model Preset
+              </Button>
+              {showPresetMenu && (
+                <>
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setShowPresetMenu(false)}
+                  />
+                  <div className="absolute right-0 mt-1 z-50 w-64 rounded-xl border border-border bg-surface-2 shadow-lg p-1.5 flex flex-col gap-0.5 max-h-72 overflow-y-auto">
+                    <p className="text-xs font-medium text-text-muted px-2 py-1">
+                      {keyPresets.length === 0 ? "No presets yet" : "Apply a preset to the key form"}
+                    </p>
+                    {keyPresets.map((p) => (
+                      <div
+                        key={p.id}
+                        className="flex items-center rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                      >
+                        <button
+                          onClick={() => { setShowPresetMenu(false); openEditPresetModal(p); }}
+                          className="flex items-center justify-between gap-2 px-2 py-1.5 flex-1 min-w-0 text-left"
+                        >
+                          <span className="text-sm font-medium truncate">{p.name}</span>
+                          <span className="text-xs text-text-muted shrink-0">
+                            {Array.isArray(p.models) ? p.models.length : 0} models
+                          </span>
+                        </button>
+                        <button
+                          onClick={() => handleDeletePreset(p.id)}
+                          className="p-1.5 mr-1 hover:bg-red-500/10 rounded-md text-red-500 transition-colors shrink-0"
+                          title="Delete preset"
+                        >
+                          <span className="material-symbols-outlined text-[15px]">delete</span>
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      onClick={openPresetModal}
+                      className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left text-primary"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">add</span>
+                      New Preset…
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+            <Button icon="add" onClick={openCreateModal}>
+              Create Key
+            </Button>
+          </div>
         </div>
 
         <div className="flex items-center justify-between pb-4 mb-4 border-b border-border">
@@ -1001,7 +1272,7 @@ export default function APIPageClient({ machineId }) {
             </div>
             <p className="text-text-main font-medium mb-1">No API keys yet</p>
             <p className="text-sm text-text-muted mb-4">Create your first API key to get started</p>
-            <Button icon="add" onClick={() => setShowAddModal(true)}>
+            <Button icon="add" onClick={openCreateModal}>
               Create Key
             </Button>
           </div>
@@ -1036,14 +1307,41 @@ export default function APIPageClient({ machineId }) {
                       </span>
                     </button>
                   </div>
-                  <p className="text-xs text-text-muted mt-1">
-                    Created {new Date(key.createdAt).toLocaleDateString()}
-                  </p>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1">
+                    <p className="text-xs text-text-muted">
+                      Created {new Date(key.createdAt).toLocaleDateString("en-GB")}
+                    </p>
+                    {key.expiresAt && (
+                      <span
+                        className={`text-xs px-1.5 py-0.5 rounded ${
+                          key.expired
+                            ? "bg-red-500/10 text-red-500"
+                            : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                        }`}
+                      >
+                        {key.expired
+                          ? `Expired ${new Date(key.expiresAt).toLocaleDateString("en-GB")}`
+                          : `Expires ${new Date(key.expiresAt).toLocaleDateString("en-GB")}`}
+                      </span>
+                    )}
+                    {Array.isArray(key.allowedModels) && key.allowedModels.length > 0 && (
+                      <span className="text-xs px-1.5 py-0.5 rounded bg-surface-2 text-text-muted">
+                        {key.allowedModels.length} model{key.allowedModels.length > 1 ? "s" : ""} allowed
+                      </span>
+                    )}
+                  </div>
                   {key.isActive === false && (
                     <p className="text-xs text-orange-500 mt-1">Paused</p>
                   )}
                 </div>
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => openEditModal(key)}
+                    className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
+                    title="Edit key"
+                  >
+                    <span className="material-symbols-outlined text-[18px]">edit</span>
+                  </button>
                   <Toggle
                     size="sm"
                     checked={key.isActive ?? true}
@@ -1076,34 +1374,191 @@ export default function APIPageClient({ machineId }) {
         )}
       </Card>
 
-      {/* Add Key Modal */}
+      {/* Add / Edit Key Modal */}
       <Modal
         isOpen={showAddModal}
-        title="Create API Key"
-        onClose={() => {
-          setShowAddModal(false);
-          setNewKeyName("");
-        }}
+        title={editingKey ? "Edit API Key" : "Create API Key"}
+        onClose={resetKeyModal}
       >
         <div className="flex flex-col gap-4">
           <Input
             label="Key Name"
-            value={newKeyName}
-            onChange={(e) => setNewKeyName(e.target.value)}
+            value={editingKey ? keyForm.name : newKeyName}
+            onChange={(e) => editingKey
+              ? setKeyForm((prev) => ({ ...prev, name: e.target.value }))
+              : setNewKeyName(e.target.value)}
             placeholder="Production Key"
           />
-          <div className="flex gap-2">
-            <Button onClick={handleCreateKey} fullWidth disabled={!newKeyName.trim()}>
-              Create
-            </Button>
-            <Button
-              onClick={() => {
-                setShowAddModal(false);
-                setNewKeyName("");
+
+          {/* Preset selector */}
+          {keyPresets.length > 0 && (
+            <Select
+              label="Preset"
+              options={[
+                { value: "__none__", label: "No preset (allow all models)" },
+                ...keyPresets.map((p) => ({ value: p.id, label: p.name })),
+              ]}
+              value="__none__"
+              onChange={(e) => {
+                const preset = keyPresets.find((p) => p.id === e.target.value);
+                applyPreset(preset);
               }}
-              variant="ghost"
+              placeholder="Select a preset…"
+            />
+          )}
+
+          {/* Allowed models / combos */}
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-sm font-medium text-text-main">
+                Allowed Models & Combos
+              </label>
+              {keyForm.allowedModels && keyForm.allowedModels.length > 0 && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setKeyForm((prev) => ({ ...prev, allowedModels: null }))}
+                >
+                  Allow all models
+                </Button>
+              )}
+            </div>
+            <p className="text-xs text-text-muted">
+              Leave empty to allow every model and combo. Keys with a restricted list can only
+              request the models/combos below.
+            </p>
+
+            {allModels.length === 0 && combos.length === 0 ? (
+              <p className="text-xs text-text-muted py-1">Loading models…</p>
+            ) : (
+              <>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-text-muted">
+                    <span className="material-symbols-outlined text-[18px]">search</span>
+                  </div>
+                  <input
+                    type="text"
+                    value={modelSearch}
+                    onChange={(e) => setModelSearch(e.target.value)}
+                    placeholder="Search models & combos…"
+                    className="w-full py-2 pl-10 pr-8 text-sm text-text-main bg-surface-2 rounded-[10px] border border-transparent focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500/40 transition-all duration-150 text-[16px] sm:text-sm"
+                  />
+                  {modelSearch && (
+                    <button
+                      onClick={() => setModelSearch("")}
+                      className="absolute inset-y-0 right-0 flex items-center pr-3 text-text-muted hover:text-text-main transition-colors"
+                      title="Clear search"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">close</span>
+                    </button>
+                  )}
+                </div>
+                <div className="max-h-[40vh] overflow-y-auto custom-scrollbar border border-border rounded-lg p-2 flex flex-col gap-0.5 bg-surface-2/50">
+                  {combos
+                    .filter((combo) => !modelSearch || combo.name.toLowerCase().includes(modelSearch.toLowerCase()))
+                    .map((combo) => {
+                      const checked = Array.isArray(keyForm.allowedModels) && keyForm.allowedModels.includes(combo.name);
+                      return (
+                        <label
+                          key={`combo-${combo.id}`}
+                          className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleAllowedModel(combo.name)}
+                            className="accent-[var(--brand-500)]"
+                          />
+                          <span className="text-xs font-mono text-primary">{combo.name}</span>
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-surface-2 text-text-muted ml-auto shrink-0">combo</span>
+                        </label>
+                      );
+                    })}
+                  {allModels
+                    .filter((m) => {
+                      const modelKey = m.routedModel || m.fullModel || `${m.provider}/${m.model}`;
+                      return !modelSearch || modelKey.toLowerCase().includes(modelSearch.toLowerCase());
+                    })
+                    .map((m) => {
+                      const modelKey = m.routedModel || m.fullModel || `${m.provider}/${m.model}`;
+                      const checked = Array.isArray(keyForm.allowedModels) && keyForm.allowedModels.includes(modelKey);
+                      return (
+                        <label
+                          key={modelKey}
+                          className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleAllowedModel(modelKey)}
+                            className="accent-[var(--brand-500)]"
+                          />
+                          <span className="text-xs font-mono">{modelKey}</span>
+                        </label>
+                      );
+                    })}
+                  {combos.filter((combo) => !modelSearch || combo.name.toLowerCase().includes(modelSearch.toLowerCase())).length === 0 &&
+                    allModels.filter((m) => {
+                      const modelKey = m.routedModel || m.fullModel || `${m.provider}/${m.model}`;
+                      return !modelSearch || modelKey.toLowerCase().includes(modelSearch.toLowerCase());
+                    }).length === 0 && (
+                      <p className="text-xs text-text-muted text-center py-3">No models match &quot;{modelSearch}&quot;</p>
+                    )}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Expiry */}
+          <div className="flex flex-col gap-2">
+            <label className="text-sm font-medium text-text-main">Expiration</label>
+            <label className="flex items-center gap-2 cursor-pointer text-sm text-text-main">
+              <input
+                type="checkbox"
+                checked={!keyForm.expiresAt}
+                onChange={(e) => {
+                  if (e.target.checked) {
+                    setKeyForm((prev) => ({ ...prev, expiresAt: null }));
+                  } else {
+                    const today = new Date();
+                    today.setHours(23, 59, 59, 999);
+                    setKeyForm((prev) => ({ ...prev, expiresAt: today.toISOString() }));
+                  }
+                }}
+                className="accent-[var(--brand-500)]"
+              />
+              Never Expired
+            </label>
+            {keyForm.expiresAt && (
+              <input
+                type="date"
+                value={keyForm.expiresAt ? keyForm.expiresAt.slice(0, 10) : ""}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setKeyForm((prev) => ({
+                    ...prev,
+                    expiresAt: val ? new Date(`${val}T23:59:59.999`).toISOString() : null,
+                  }));
+                }}
+                className="w-full py-2.5 px-3 text-sm text-text-main bg-surface-2 rounded-[10px] border border-transparent focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500/40"
+              />
+            )}
+            {keyForm.expiresAt && (
+              <p className="text-xs text-text-muted">
+                The key will stop working on {new Date(keyForm.expiresAt).toLocaleDateString("en-GB")}.
+              </p>
+            )}
+          </div>
+
+          <div className="flex gap-2">
+            <Button
+              onClick={handleCreateKey}
               fullWidth
+              disabled={!(editingKey ? keyForm.name : newKeyName).trim()}
             >
+              {editingKey ? "Save Changes" : "Create"}
+            </Button>
+            <Button onClick={resetKeyModal} variant="ghost" fullWidth>
               Cancel
             </Button>
           </div>
@@ -1287,6 +1742,110 @@ export default function APIPageClient({ machineId }) {
               {tsLoading ? "Disabling..." : "Disable"}
             </Button>
             <Button onClick={() => setShowDisableTsModal(false)} variant="ghost" fullWidth disabled={tsLoading}>Cancel</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Model Preset Manager Modal (separate form) */}
+      <Modal
+        isOpen={showPresetModal}
+        title={editingPresetId ? "Edit Model Preset" : "New Model Preset"}
+        onClose={closePresetModal}
+      >
+        <div className="flex flex-col gap-4">
+          <div>
+            <Input
+              label="Preset Name"
+              value={presetName}
+              onChange={(e) => setPresetName(e.target.value)}
+              placeholder="e.g. Coding models"
+            />
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label className="text-sm font-medium text-text-main">Models & Combos</label>
+            <div className="relative">
+              <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-text-muted">
+                <span className="material-symbols-outlined text-[18px]">search</span>
+              </div>
+              <input
+                type="text"
+                value={presetSearch}
+                onChange={(e) => setPresetSearch(e.target.value)}
+                placeholder="Search models & combos…"
+                className="w-full py-2 pl-10 pr-8 text-sm text-text-main bg-surface-2 rounded-[10px] border border-transparent focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500/40 transition-all duration-150 text-[16px] sm:text-sm"
+              />
+              {presetSearch && (
+                <button
+                  onClick={() => setPresetSearch("")}
+                  className="absolute inset-y-0 right-0 flex items-center pr-3 text-text-muted hover:text-text-main transition-colors"
+                  title="Clear search"
+                >
+                  <span className="material-symbols-outlined text-[18px]">close</span>
+                </button>
+              )}
+            </div>
+            <p className="text-xs text-text-muted">
+              Select the models and combos to include in this preset.
+            </p>
+            <div className="max-h-[40vh] overflow-y-auto custom-scrollbar border border-border rounded-lg p-2 flex flex-col gap-0.5 bg-surface-2/50">
+              {combos
+                .filter((combo) => !presetSearch || combo.name.toLowerCase().includes(presetSearch.toLowerCase()))
+                .map((combo) => {
+                  const checked = presetDraft.includes(combo.name);
+                  return (
+                    <label
+                      key={`preset-combo-${combo.id}`}
+                      className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => togglePresetModel(combo.name)}
+                        className="accent-[var(--brand-500)]"
+                      />
+                      <span className="text-xs font-mono text-primary">{combo.name}</span>
+                      <span className="text-[10px] px-1 py-0.5 rounded bg-surface-2 text-text-muted ml-auto shrink-0">combo</span>
+                    </label>
+                  );
+                })}
+              {allModels
+                .filter((m) => {
+                  const modelKey = m.routedModel || m.fullModel || `${m.provider}/${m.model}`;
+                  return !presetSearch || modelKey.toLowerCase().includes(presetSearch.toLowerCase());
+                })
+                .map((m) => {
+                  const modelKey = m.routedModel || m.fullModel || `${m.provider}/${m.model}`;
+                  const checked = presetDraft.includes(modelKey);
+                  return (
+                    <label
+                      key={`preset-model-${modelKey}`}
+                      className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => togglePresetModel(modelKey)}
+                        className="accent-[var(--brand-500)]"
+                      />
+                      <span className="text-xs font-mono">{modelKey}</span>
+                    </label>
+                  );
+                })}
+            </div>
+          </div>
+
+          <div className="flex gap-2">
+            <Button
+              onClick={handleSavePreset}
+              fullWidth
+              disabled={!presetName.trim() || presetDraft.length === 0 || savingPreset}
+            >
+              {savingPreset ? "Saving…" : editingPresetId ? "Save Changes" : "Save Preset"}
+            </Button>
+            <Button onClick={closePresetModal} variant="ghost" fullWidth>
+              Cancel
+            </Button>
           </div>
         </div>
       </Modal>

@@ -1,6 +1,7 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { makeKv } from "../helpers/kvStore.js";
+import { resolveNodeIdByPrefix } from "./nodesRepo.js";
 
 const aliasKv = makeKv("modelAliases");
 const customKv = makeKv("customModels");
@@ -105,11 +106,14 @@ export async function deleteCustomModelsByProvider(providerAlias, type = null) {
 // Return the stored capability overrides ({vision, reasoning, ...}) for a custom
 // model, or null when the model isn't a custom model or carries no caps. Looked
 // up by providerAlias + id (the LLM type — vision/reasoning apply to chat models).
-// Fail-open: any DB error resolves to null so routing is never blocked.
+// Compatible-provider aliases resolve to the node id first (rows are stored under
+// the node id, but model strings use the display prefix). Fail-open: any DB error
+// resolves to null so routing is never blocked.
 export async function getCustomModelCaps(providerAlias, id) {
   if (!providerAlias || !id) return null;
   try {
-    const raw = await customKv.get(customKey(providerAlias, id, "llm"));
+    const resolved = await resolveNodeIdByPrefix(providerAlias);
+    const raw = await customKv.get(customKey(resolved, id, "llm"));
     return raw && raw.caps && typeof raw.caps === "object" ? raw.caps : null;
   } catch {
     return null;

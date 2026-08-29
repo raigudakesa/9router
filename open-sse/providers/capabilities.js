@@ -337,6 +337,19 @@ export const PATTERN_CAPABILITIES = [
   { pattern: "*ling-*",         caps: { reasoning: true, contextWindow: 128000 } },
 ];
 
+// A custom compatible node is addressed either by its generated id
+// ("openai-compatible-chat-<uuid>") or by the user's chosen display prefix
+// ("unl-jembatanai"). Neither has a registry entry, so the base-model pattern
+// tables (e.g. "*claude*sonnet*" → vision) describe a DIFFERENT provider's model
+// and must NOT apply — the caps come only from what the user declared. Detect
+// node ids by their generated prefix; the raw provider string failing the
+// resolve step below covers the display-prefix form without special-casing.
+const CUSTOM_NODE_ID_PREFIXES = ["openai-compatible-", "anthropic-compatible-", "custom-embedding-"];
+export function isCustomNodeProviderId(provider) {
+  if (!provider || typeof provider !== "string") return false;
+  return CUSTOM_NODE_ID_PREFIXES.some((p) => provider.startsWith(p));
+}
+
 /**
  * Resolve capabilities for a model using the 4-step fallback chain,
  * merged over DEFAULT_CAPABILITIES so the result is always complete.
@@ -363,14 +376,25 @@ export function getCapabilitiesForModel(provider, model, overrides = null) {
     if (providerCaps?.[baseModel]) return { ...DEFAULT_CAPABILITIES, ...providerCaps[baseModel], ...ov };
   }
 
-  // 2. Canonical exact
-  if (MODEL_CAPABILITIES[baseModel]) return { ...DEFAULT_CAPABILITIES, ...MODEL_CAPABILITIES[baseModel], ...ov };
-  if (MODEL_CAPABILITIES[model]) return { ...DEFAULT_CAPABILITIES, ...MODEL_CAPABILITIES[model], ...ov };
+  // 2. Canonical exact. Skipped for custom compatible nodes — the canonical table
+  //     describes BUILT-IN provider models (e.g. "claude-sonnet-5" = Anthropic's).
+  //     A same-named model on a custom node only has the caps the user declared.
+  const customNode = isCustomNodeProviderId(provider);
+  if (!customNode) {
+    if (MODEL_CAPABILITIES[baseModel]) return { ...DEFAULT_CAPABILITIES, ...MODEL_CAPABILITIES[baseModel], ...ov };
+    if (MODEL_CAPABILITIES[model]) return { ...DEFAULT_CAPABILITIES, ...MODEL_CAPABILITIES[model], ...ov };
+  }
 
-  // 3. Pattern match (first match wins)
-  for (const { pattern, caps } of PATTERN_CAPABILITIES) {
-    if (matchPattern(pattern, baseModel) || matchPattern(pattern, model)) {
-      return { ...DEFAULT_CAPABILITIES, ...caps, ...ov };
+  // 3. Pattern match (first match wins). Skipped for custom compatible nodes —
+  // their generated id / display prefix has no registry entry, so the pattern
+  // tables describe a DIFFERENT provider's model (e.g. a "claude-sonnet-5" on a
+  // custom node must NOT inherit Anthropic's vision/reasoning caps). Caps for
+  // custom models come ONLY from the user's declared overrides (ov above).
+  if (!customNode) {
+    for (const { pattern, caps } of PATTERN_CAPABILITIES) {
+      if (matchPattern(pattern, baseModel) || matchPattern(pattern, model)) {
+        return { ...DEFAULT_CAPABILITIES, ...caps, ...ov };
+      }
     }
   }
 

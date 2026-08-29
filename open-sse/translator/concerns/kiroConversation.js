@@ -11,6 +11,29 @@ function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
+// JSON-Schema keywords Kiro rejects anywhere in a tool schema (400 "Improperly
+// formed request"). Mirrors the OmniRoute sanitizer set: additionalProperties,
+// composition combinators, references, conditionals, and content annotations.
+const KIRO_INVALID_SCHEMA_KEYS = new Set([
+  "additionalProperties",
+  "anyOf",
+  "oneOf",
+  "allOf",
+  "not",
+  "$schema",
+  "$id",
+  "$ref",
+  "$defs",
+  "definitions",
+  "if",
+  "then",
+  "else",
+  "unevaluatedProperties",
+  "unevaluatedItems",
+  "contentEncoding",
+  "contentMediaType",
+]);
+
 function text(value) {
   if (typeof value === "string") return value;
   if (value == null) return "";
@@ -53,7 +76,7 @@ function cleanSchemaValue(value) {
 
   const cleaned = {};
   for (const [key, child] of Object.entries(value)) {
-    if (key === "additionalProperties") continue;
+    if (KIRO_INVALID_SCHEMA_KEYS.has(key)) continue;
     if (key === "required" && Array.isArray(child) && child.length === 0) continue;
     cleaned[key] = cleanSchemaValue(child);
   }

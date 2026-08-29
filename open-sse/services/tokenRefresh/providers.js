@@ -271,7 +271,7 @@ async function resolveKiroProfileArnPatch(providerSpecificData, accessToken, ref
   let profileArn = refreshedArn?.trim?.() || null;
   if (!profileArn) {
     const { fetchKiroProfileArn } = await import("../../../src/lib/oauth/providers.js");
-    profileArn = await fetchKiroProfileArn(accessToken);
+    profileArn = await fetchKiroProfileArn(accessToken, providerSpecificData?.region);
   }
   return profileArn ? { providerSpecificData: { profileArn } } : {};
 }
@@ -304,6 +304,16 @@ export async function refreshKiroToken(refreshToken, providerSpecificData, log, 
 
     if (!response.ok) {
       const errorText = await response.text();
+      let oauthErr;
+      try {
+        oauthErr = JSON.parse(errorText)?.error;
+      } catch { /* not JSON */ }
+      if (oauthErr === "invalid_grant" || oauthErr === "invalid_client") {
+        log?.error?.("TOKEN_REFRESH", "Kiro external_idp refresh token expired/invalid. Re-authentication required.", {
+          oauthErr,
+        });
+        return { error: "unrecoverable_refresh_error", code: oauthErr };
+      }
       log?.error?.("TOKEN_REFRESH", "Failed to refresh Kiro external_idp token", {
         status: response.status,
         error: errorText,
@@ -329,8 +339,9 @@ export async function refreshKiroToken(refreshToken, providerSpecificData, log, 
 
   if (clientId && clientSecret) {
     const isIDC = authMethod === "idc";
+    const resolvedRegion = region || "us-east-1";
     const endpoint = isIDC && region
-      ? `https://oidc.${region}.amazonaws.com/token`
+      ? `https://oidc.${resolvedRegion}.amazonaws.com/token`
       : "https://oidc.us-east-1.amazonaws.com/token";
 
     const response = await proxyAwareFetch(endpoint, {
@@ -349,9 +360,89 @@ export async function refreshKiroToken(refreshToken, providerSpecificData, log, 
 
     if (!response.ok) {
       const errorText = await response.text();
+
+      // AWS SSO OIDC uses {"__type": "InvalidGrantException"} error format (not
+      // standard OAuth2). Detect it so callers can prompt re-auth instead of
+      // silently retrying.
+      let awsErrorType;
+      try {
+        const awsError = JSON.parse(errorText);
+        awsErrorType = awsError.__type || awsError.error;
+      } catch { /* not JSON */ }
+
+      // If the refresh token itself is expired/revoked, no amount of
+      // re-registration helps.
+      if (["InvalidGrantException", "ExpiredTokenException", "invalid_grant"].includes(awsErrorType)) {
+        log?.error?.("TOKEN_REFRESH", "Kiro AWS refresh token expired/invalid. Re-authentication required.", {
+          awsErrorType,
+        });
+        return { error: "unrecoverable_refresh_error", code: awsErrorType };
+      }
+
+      // Client credentials may be expired/invalid (DB import, TTL expiry,
+      // browser conflict). Re-register a fresh OIDC client and retry once
+      // before giving up (#2524).
+      log?.warn?.("TOKEN_REFRESH", "Kiro OIDC refresh failed, attempting client re-registration...", {
+        status: response.status,
+        error: errorText.slice(0, 200),
+      });
+
+      try {
+        const regEndpoint = `https://oidc.${resolvedRegion}.amazonaws.com/client/register`;
+        const regRes = await proxyAwareFetch(regEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({
+            clientName: "kiro-oauth-client",
+            clientType: "public",
+            scopes: [
+              "codewhisperer:completions",
+              "codewhisperer:analysis",
+              "codewhisperer:conversations",
+            ],
+            grantTypes: ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
+            issuerUrl: "https://identitycenter.amazonaws.com/ssoins-722374e8c3c8e6c6",
+          }),
+        }, proxyOptions);
+
+        if (regRes.ok) {
+          const newClient = await regRes.json();
+          const retryRes = await proxyAwareFetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({
+              clientId: newClient.clientId,
+              clientSecret: newClient.clientSecret,
+              refreshToken: refreshToken,
+              grantType: "refresh_token",
+            }),
+          }, proxyOptions);
+
+          if (retryRes.ok) {
+            const retryTokens = await retryRes.json();
+            log?.info?.("TOKEN_REFRESH", "Kiro refresh recovered via client re-registration", {
+              hasNewAccessToken: !!retryTokens.accessToken,
+              expiresIn: retryTokens.expiresIn,
+            });
+            return {
+              accessToken: retryTokens.accessToken,
+              refreshToken: retryTokens.refreshToken || refreshToken,
+              expiresIn: retryTokens.expiresIn,
+              _newClientId: newClient.clientId,
+              _newClientSecret: newClient.clientSecret,
+              _newClientSecretExpiresAt: newClient.clientSecretExpiresAt,
+            };
+          }
+        }
+      } catch (reRegErr) {
+        log?.warn?.("TOKEN_REFRESH", "Kiro client re-registration fallback failed", {
+          error: String(reRegErr),
+        });
+      }
+
       log?.error?.("TOKEN_REFRESH", "Failed to refresh Kiro AWS token", {
         status: response.status,
-        error: errorText,
+        error: errorText.slice(0, 200),
       });
       return null;
     }
@@ -385,6 +476,19 @@ export async function refreshKiroToken(refreshToken, providerSpecificData, log, 
 
   if (!response.ok) {
     const errorText = await response.text();
+
+    // Kiro may relay AWS-style errors on the social path too.
+    try {
+      const awsError = JSON.parse(errorText);
+      const awsErrorType = awsError.__type || awsError.error;
+      if (["InvalidGrantException", "ExpiredTokenException", "invalid_grant"].includes(awsErrorType)) {
+        log?.error?.("TOKEN_REFRESH", "Kiro social refresh token expired/invalid. Re-authentication required.", {
+          awsErrorType,
+        });
+        return { error: "unrecoverable_refresh_error", code: awsErrorType };
+      }
+    } catch { /* not JSON — fall through */ }
+
     log?.error?.("TOKEN_REFRESH", "Failed to refresh Kiro social token", {
       status: response.status,
       error: errorText,

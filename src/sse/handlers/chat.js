@@ -7,10 +7,9 @@ import {
   extractApiKey,
   isValidApiKey,
 } from "../services/auth.js";
-import { getSettings } from "@/lib/localDb";
-import { getCustomModelCaps, getCustomModels } from "@/models";
+import { getSettings, getApiKeyByKey, isModelAllowedForKey } from "@/lib/localDb";
+import { getCustomModelCaps, getCustomModels, findProviderNode } from "@/models";
 import { getModelInfo, getComboModels } from "../services/model.js";
-import { resolveProviderAlias } from "open-sse/services/model.js";
 import { registerCustomModelCaps } from "open-sse/providers/customModelCaps.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
@@ -41,9 +40,18 @@ async function warmCustomModelCaps() {
     const models = await getCustomModels();
     for (const m of models) {
       if (!m?.providerAlias || !m?.id || !m?.caps) continue;
-      // Register under the resolved provider id — the same value combo's
-      // getCapabilitiesForModel(provider, model) is keyed by.
-      registerCustomModelCaps(resolveProviderAlias(m.providerAlias), m.id, m.caps);
+      // Compatible-provider rows are stored under the generated node id, but model
+      // strings use the display prefix. registerCustomModelCaps keys by an exact
+      // provider string, so register under BOTH the node id AND (when different)
+      // the prefix so lookups that pass either one (chatCore passes the id; combo
+      // string keys pass the prefix) both find the declared caps.
+      const node = await findProviderNode(m.providerAlias);
+      const keys = [m.providerAlias];
+      if (node) {
+        keys.push(node.id);
+        if (node.prefix && node.prefix !== node.id) keys.push(node.prefix);
+      }
+      for (const k of keys) registerCustomModelCaps(k, m.id, m.caps);
     }
   } catch {
     // fail-open: cold registry just means caps warm up on first routed request
@@ -104,6 +112,20 @@ export async function handleChat(request, clientRawRequest = null) {
   if (!modelStr) {
     log.warn("CHAT", "Missing model");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
+  }
+
+  // Per-key model allow-list (only when a key was presented; local mode is unrestricted)
+  if (apiKey) {
+    try {
+      const keyRow = await getApiKeyByKey(apiKey);
+      if (keyRow && !isModelAllowedForKey(keyRow, modelStr)) {
+        log.warn("AUTH", `Model "${modelStr}" not allowed for this API key`);
+        return errorResponse(HTTP_STATUS.FORBIDDEN, `Model "${modelStr}" is not allowed for this API key`);
+      }
+    } catch (e) {
+      // fail-open: never block on lookup errors
+      log.warn("AUTH", `Model allow-list check failed: ${e.message}`);
+    }
   }
 
   // Bypass naming/warmup requests before combo rotation to avoid wasting rotation slots

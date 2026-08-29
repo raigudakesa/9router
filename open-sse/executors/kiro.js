@@ -14,6 +14,9 @@ import { STREAM_FIRST_CHUNK_TIMEOUT_MS } from "../config/runtimeConfig.js";
 const KIRO_REPAIR_BUFFER_MAX_BYTES = 8 * 1024 * 1024;
 const KIRO_REPAIR_HEARTBEAT_MS = 10_000;
 const KIRO_SHORT_FINAL_MAX_CHARS = 800;
+// Max length of an unfinished inline-thinking tag we might still complete on
+// the next frame (`</thinking>` is the longest at 11 chars).
+const KIRO_THINKING_PARTIAL_MAX = 11;
 const EVENTSTREAM_MAX_MESSAGE_BYTES = 24 * 1024 * 1024;
 const EVENTSTREAM_MAX_HEADERS_BYTES = 128 * 1024;
 const KIRO_EVENT_TYPES = new Set([
@@ -218,6 +221,73 @@ function inspectSSEChunk(chunk, state) {
 }
 
 /**
+ * Stream-safe inline `<thinking>` splitter for Claude on Kiro.
+ *
+ * When a request asked for thinking, Kiro streams Claude's reasoning INLINE as
+ * `<thinking>…</thinking>` blocks inside `assistantResponseEvent.content`
+ * rather than as separate `reasoningContentEvent` frames. Walk one slice of
+ * upstream content at a time and route characters to either the content
+ * channel or the reasoning channel based on the current `<thinking>` state.
+ *
+ * State is mutated on `state` so a tag split between frames (e.g. `…</think`
+ * followed by `ing>foo`) is still recognised. Drains the pending tag on
+ * end-of-stream so a truncated tail (`<thi`) is not silently dropped.
+ *
+ * @param {object} state Mutable state: `{ thinkingMode: boolean, pendingTag: string }`.
+ * @param {string} raw   Next slice from `assistantResponseEvent.content`.
+ * @param {function(string)} onContent   Text that should land in `delta.content`.
+ * @param {function(string)} onReasoning Text that should land in `delta.reasoning_content`.
+ */
+function splitInlineThinking(state, raw, onContent, onReasoning) {
+  let text = (state.pendingTag || "") + (raw || "");
+  state.pendingTag = "";
+
+  while (text.length > 0) {
+    const target = state.thinkingMode ? "</thinking>" : "<thinking>";
+    const idx = text.indexOf(target);
+
+    if (idx === -1) {
+      // No full target tag in `text`. Look for a possible partial at the end
+      // so we can complete it on the next frame.
+      let holdFrom = text.length;
+      for (let i = Math.max(0, text.length - KIRO_THINKING_PARTIAL_MAX); i < text.length; i++) {
+        const tail = text.slice(i);
+        if (target.startsWith(tail) && tail.length > 0) {
+          holdFrom = i;
+          break;
+        }
+      }
+      const flushable = text.slice(0, holdFrom);
+      if (flushable) {
+        if (state.thinkingMode) onReasoning(flushable);
+        else onContent(flushable);
+      }
+      state.pendingTag = text.slice(holdFrom);
+      return;
+    }
+
+    // Found a complete target tag. Flush everything before it in the current
+    // mode, flip the mode, and keep walking the remainder.
+    const before = text.slice(0, idx);
+    if (before) {
+      if (state.thinkingMode) onReasoning(before);
+      else onContent(before);
+    }
+    state.thinkingMode = !state.thinkingMode;
+    text = text.slice(idx + target.length);
+  }
+}
+
+/** Drain any leftover pending inline-thinking tag at end-of-stream. */
+function flushPendingThinking(state, onContent, onReasoning) {
+  if (!state.pendingTag) return;
+  const leftover = state.pendingTag;
+  state.pendingTag = "";
+  if (state.thinkingMode) onReasoning(leftover);
+  else onContent(leftover);
+}
+
+/**
  * KiroExecutor - Executor for Kiro AI (AWS CodeWhisperer)
  * Uses AWS CodeWhisperer streaming API with AWS EventStream binary format
  */
@@ -322,7 +392,35 @@ export class KiroExecutor extends BaseExecutor {
   }
 
   transformRequest(model, body, stream, credentials) {
-    return body;
+    // Kiro is strict about unknown top-level fields: keep only what the
+    // openai-to-kiro translator builds, plus `systemPrompt` (used by the
+    // integrity-gate repair path to append retry instructions), so nothing
+    // leaks through on the retry/repair paths that re-serialize this body.
+    const b = body && typeof body === "object" ? body : {};
+    const kiroPayload = {};
+    if (b.conversationState !== undefined) kiroPayload.conversationState = b.conversationState;
+    if (b.profileArn !== undefined) kiroPayload.profileArn = b.profileArn;
+    if (b.inferenceConfig !== undefined) kiroPayload.inferenceConfig = b.inferenceConfig;
+    if (b.additionalModelRequestFields !== undefined) {
+      kiroPayload.additionalModelRequestFields = b.additionalModelRequestFields;
+    }
+    // Repair retries (appendRepairInstruction) carry the retry instruction in
+    // a top-level systemPrompt. 9router's own translator does not set this
+    // field (Kiro rejects it for fresh traffic), but the repair path relies on
+    // it reaching upstream — keep it when the integrity gate added it.
+    if (typeof b.systemPrompt === "string" && b.systemPrompt.length > 0) {
+      kiroPayload.systemPrompt = b.systemPrompt;
+    }
+
+    // Fallback: if somehow conversationState is missing, return the rest
+    // without the model field (backward compat if something bypasses the
+    // translator).
+    if (!kiroPayload.conversationState) {
+      const { model: _model, ...rest } = b;
+      return rest;
+    }
+
+    return kiroPayload;
   }
 
   /**
@@ -345,6 +443,23 @@ export class KiroExecutor extends BaseExecutor {
     const result = await super.execute(args);
     if (result?.response?.ok) this.attachIntegrityGate(result, args);
     return result;
+  }
+
+  /**
+   * Detect whether a request asked Kiro for thinking. When thinking is enabled
+   * via the legacy `<thinking_mode>` system tag, Claude on Kiro streams its
+   * reasoning INLINE as `<thinking>…</thinking>` blocks inside
+   * `assistantResponseEvent.content` rather than as separate
+   * `reasoningContentEvent` frames. The inline splitter must only run for such
+   * requests — re-routing normal text that legitimately contains `<thinking>`
+   * would corrupt non-thinking traffic.
+   */
+  requestEnabledThinking(args) {
+    const body = args?.body;
+    const current = body?.conversationState?.currentMessage?.userInputMessage;
+    const content = typeof current?.content === "string" ? current.content : "";
+    return content.includes("<thinking_mode>enabled</thinking_mode>") ||
+      content.includes("<thinking_mode>interleaved</thinking_mode>");
   }
 
   attachIntegrityGate(result, args) {
@@ -379,7 +494,8 @@ export class KiroExecutor extends BaseExecutor {
             maxBytes,
             ttftTimeoutMs,
             stallTimeoutMs,
-            repairEnabled
+            repairEnabled,
+            thinkingExpected: this.requestEnabledThinking(args)
           });
           if (abortController.signal.aborted) throw makeAbortError(abortController.signal.reason);
           controller.enqueue(bytes);
@@ -524,6 +640,7 @@ export class KiroExecutor extends BaseExecutor {
     let diagnostics;
     const transformed = this.transformEventStreamToSSE(rawResponse, model, {
       maxToolBytes: Math.max(1, Math.floor(options.maxBytes / 2)),
+      thinkingExpected: options.thinkingExpected === true,
       onTerminalState: (value) => {
         diagnostics = value;
       }
@@ -635,7 +752,10 @@ export class KiroExecutor extends BaseExecutor {
       inThinking: false,
       toolValidationError: null,
       validatedFrames: 0,
-      finished: false
+      finished: false,
+      // Inline-thinking splitter state (populated only when thinkingExpected).
+      thinking: options.thinkingExpected ? { thinkingMode: false, pendingTag: "" } : null,
+      reasoningChunkCount: 0
     };
 
     const diagnostics = (overrides = {}) => ({
@@ -785,37 +905,84 @@ export class KiroExecutor extends BaseExecutor {
       const eventType = event.headers[":event-type"] || "";
       const eventCountKey = KIRO_EVENT_TYPES.has(eventType) ? eventType : "other";
       eventCounts[eventCountKey] = (eventCounts[eventCountKey] || 0) + 1;
+
       if (eventType === "assistantResponseEvent" && typeof event.payload?.content === "string") {
-        let content = event.payload.content;
-        if (state.inThinking) {
-          const end = content.indexOf("</thinking>");
-          if (end < 0) content = "";
-          else {
-            state.inThinking = false;
-            content = content.slice(end + 11).replace(/^\n/u, "");
-          }
+        const rawContent = event.payload.content;
+        if (state.thinking) {
+          // Thinking was requested (additionalModelRequestFields or a
+          // <thinking_mode> tag): Claude on Kiro streams reasoning inline as
+          // <thinking>…</thinking> blocks. Split them into the OpenAI
+          // reasoning_content channel so downstream translators see the same
+          // shape as a native reasoning stream.
+          state.totalContentLength += rawContent.length;
+          splitInlineThinking(
+            state.thinking,
+            rawContent,
+            (text) => {
+              if (!text) return;
+              state.hasText = true;
+              emitDelta(controller, { content: text });
+            },
+            (reasoning) => {
+              if (!reasoning) return;
+              state.hasReasoning = true;
+              state.reasoningChunkCount++;
+              emitDelta(controller, { reasoning_content: reasoning });
+            }
+          );
         } else {
-          const start = content.indexOf("<thinking>");
-          if (start >= 0) {
-            const end = content.indexOf("</thinking>", start + 10);
-            if (end < 0) {
-              state.inThinking = true;
-              content = content.slice(0, start);
-            } else {
-              content = content.slice(0, start) + content.slice(end + 11).replace(/^\n/u, "");
+          // Legacy strip: dump any inline <thinking> blocks so they never reach
+          // the client as visible content. Kept as-is when thinking was not
+          // requested to avoid changing non-thinking traffic.
+          let content = rawContent;
+          if (state.inThinking) {
+            const end = content.indexOf("</thinking>");
+            if (end < 0) content = "";
+            else {
+              state.inThinking = false;
+              content = content.slice(end + 11).replace(/^\n/u, "");
+            }
+          } else {
+            const start = content.indexOf("<thinking>");
+            if (start >= 0) {
+              const end = content.indexOf("</thinking>", start + 10);
+              if (end < 0) {
+                state.inThinking = true;
+                content = content.slice(0, start);
+              } else {
+                content = content.slice(0, start) + content.slice(end + 11).replace(/^\n/u, "");
+              }
             }
           }
-        }
-        if (content || !state.hasReasoning) {
-          state.hasText ||= content.length > 0;
-          state.totalContentLength += content.length;
-          emitDelta(controller, { content });
+          if (content || !state.hasReasoning) {
+            state.hasText ||= content.length > 0;
+            state.totalContentLength += content.length;
+            emitDelta(controller, { content });
+          }
         }
       } else if (eventType === "reasoningContentEvent") {
-        const value = event.payload?.reasoningContentEvent || event.payload || {};
-        const content = typeof value === "string" ? value : value.text || value.content || "";
+        // Native reasoning frames. Kiro streams reasoning in a few shapes:
+        // `reasoningContentEvent` carrying { text, signature }, a `reasoningText`
+        // object ({ text | Text }), a flat { text }, or a plain string.
+        const rp = event.payload || {};
+        const rt = rp.reasoningText;
+        let content = "";
+        if (rt !== undefined) {
+          if (rt && typeof rt === "object") {
+            content = typeof rt.text === "string" ? rt.text
+              : typeof rt.Text === "string" ? rt.Text : "";
+          } else if (typeof rt === "string") {
+            content = rt;
+          } else if (typeof rp.text === "string") {
+            content = rp.text;
+          }
+        } else {
+          const value = rp.reasoningContentEvent || rp || {};
+          content = typeof value === "string" ? value : value.text || value.content || "";
+        }
         if (content) {
           state.hasReasoning = true;
+          state.reasoningChunkCount++;
           state.totalContentLength += content.length;
           emitDelta(controller, { reasoning_content: content });
         }
@@ -866,6 +1033,32 @@ export class KiroExecutor extends BaseExecutor {
           if (merged !== state.stopReason) state.terminalProvenance = "metadata_stop_reason";
           state.stopReason = merged;
         }
+        // Kiro reports token usage under more than one frame: `metricsEvent`
+        // (unit-test shape) and a `metadataEvent` carrying a nested `usage`
+        // object — the shape observed on live API-key traffic. Read both so
+        // cache tokens are not silently dropped on the live path.
+        const usage = metadata?.usage;
+        if (usage && typeof usage === "object") {
+          state.hasMetering = true;
+          const prompt = Number(usage.inputTokens) || 0;
+          const completion = Number(usage.outputTokens) || 0;
+          if (prompt || completion) {
+            state.usage = {
+              ...(state.usage || {}),
+              prompt_tokens: prompt,
+              completion_tokens: completion,
+              total_tokens: prompt + completion
+            };
+          }
+          const cacheRead = Number(
+            usage.cacheReadInputTokens || usage.cacheReadTokens || usage.cache_read_input_tokens
+          ) || 0;
+          const cacheCreate = Number(
+            usage.cacheWriteInputTokens || usage.cacheCreationTokens || usage.cache_creation_input_tokens
+          ) || 0;
+          if (cacheRead) state.usage = { ...(state.usage || {}), cache_read_input_tokens: cacheRead };
+          if (cacheCreate) state.usage = { ...(state.usage || {}), cache_creation_input_tokens: cacheCreate };
+        }
       } else if (eventType === "contextUsageEvent") {
         const percentage = Number(event.payload?.contextUsagePercentage);
         if (Number.isFinite(percentage)) {
@@ -884,9 +1077,25 @@ export class KiroExecutor extends BaseExecutor {
           };
         }
       } else if (eventType === "metricsEvent") {
+        // Accept both Bedrock-style (`inputTokens`/`outputTokens`) and
+        // OpenAI-style (`prompt_tokens`/`completion_tokens`) spellings, plus
+        // the cache-token variants across their naming conventions.
         const metrics = event.payload?.metricsEvent || event.payload || {};
-        const prompt = Number(metrics.inputTokens) || 0;
-        const completion = Number(metrics.outputTokens) || 0;
+        const readNumber = (...candidates) => {
+          for (const value of candidates) {
+            const num = Number(value);
+            if (Number.isFinite(num) && num > 0) return num;
+          }
+          return 0;
+        };
+        const prompt = readNumber(metrics.inputTokens, metrics.prompt_tokens);
+        const completion = readNumber(metrics.outputTokens, metrics.completion_tokens);
+        const cacheRead = readNumber(
+          metrics.cacheReadInputTokens, metrics.cacheReadTokens, metrics.cache_read_input_tokens
+        );
+        const cacheCreate = readNumber(
+          metrics.cacheWriteInputTokens, metrics.cacheCreationTokens, metrics.cache_creation_input_tokens
+        );
         if (prompt || completion) {
           state.usage = {
             ...(state.usage || {}),
@@ -894,11 +1103,9 @@ export class KiroExecutor extends BaseExecutor {
             completion_tokens: completion,
             total_tokens: prompt + completion
           };
-          const cacheRead = Number(metrics.cacheReadInputTokens || metrics.cache_read_input_tokens) || 0;
-          const cacheCreate = Number(metrics.cacheCreationInputTokens || metrics.cache_creation_input_tokens) || 0;
-          if (cacheRead) state.usage.cache_read_input_tokens = cacheRead;
-          if (cacheCreate) state.usage.cache_creation_input_tokens = cacheCreate;
         }
+        if (cacheRead) state.usage = { ...(state.usage || {}), cache_read_input_tokens: cacheRead };
+        if (cacheCreate) state.usage = { ...(state.usage || {}), cache_creation_input_tokens: cacheCreate };
       }
       return true;
     };
@@ -1079,16 +1286,44 @@ export class KiroExecutor extends BaseExecutor {
         return;
       }
 
+      // Drain any pending inline-thinking tag fragment so we don't drop
+      // trailing characters when the stream ends mid-tag (e.g. `<thi`).
+      if (state.thinking) {
+        flushPendingThinking(
+          state.thinking,
+          (text) => {
+            if (!text) return;
+            state.hasText = true;
+            emitDelta(controller, { content: text });
+          },
+          (reasoning) => {
+            if (!reasoning) return;
+            state.hasReasoning = true;
+            emitDelta(controller, { reasoning_content: reasoning });
+          }
+        );
+      }
+
       if (state.hasMetering && state.hasContextUsage && !state.usage?.total_tokens) {
-        const completion = state.totalContentLength
+        // Synthesize usage when Kiro sent no token counts of its own.
+        // Live `generateAssistantResponse` traffic carries only
+        // contextUsagePercentage + meteringEvent credits, so these are
+        // ESTIMATES derived the same way kiro-gateway derives them.
+        //
+        // Subtraction matters: the context percentage already covers the whole
+        // context, so ADDING a separately-estimated completion on top of it
+        // double-counts and inflates total_tokens. The percentage yields the
+        // total; the response text yields the completion; the prompt is the
+        // remainder.
+        const estimatedCompletion = state.totalContentLength
           ? Math.max(1, Math.floor(state.totalContentLength / 4))
           : 0;
-        const prompt = Math.floor(state.contextUsagePercentage * contextWindow / 100);
+        const estimatedTotal = Math.floor(state.contextUsagePercentage * contextWindow / 100);
         state.usage = {
           ...(state.usage || {}),
-          prompt_tokens: prompt,
-          completion_tokens: completion,
-          total_tokens: prompt + completion
+          prompt_tokens: Math.max(0, estimatedTotal - estimatedCompletion),
+          completion_tokens: estimatedCompletion,
+          total_tokens: Math.max(estimatedCompletion, estimatedTotal)
         };
       }
       const finishReason = truncatedAfterOutput
@@ -1170,6 +1405,9 @@ export class KiroExecutor extends BaseExecutor {
   }
 
   async refreshCredentials(credentials, log, proxyOptions = null) {
+    // API-key connections have no refresh token — the key is long-lived and
+    // attempting a refresh would only 400 against the OIDC/social endpoints.
+    if (credentials?.providerSpecificData?.authMethod === "api_key") return null;
     if (!credentials.refreshToken) return null;
 
     try {
@@ -1180,6 +1418,25 @@ export class KiroExecutor extends BaseExecutor {
         log,
         proxyOptions
       );
+
+      if (!result || result.error) return result;
+
+      // If client was re-registered (expired/invalid clientId/clientSecret
+      // after DB import, TTL expiry, or browser conflict), update
+      // providerSpecificData with the new credentials (#2524).
+      if (result._newClientId) {
+        return {
+          accessToken: result.accessToken,
+          refreshToken: result.refreshToken,
+          expiresIn: result.expiresIn,
+          providerSpecificData: {
+            ...(credentials.providerSpecificData || {}),
+            clientId: result._newClientId,
+            clientSecret: result._newClientSecret,
+            clientSecretExpiresAt: result._newClientSecretExpiresAt,
+          },
+        };
+      }
 
       return result;
     } catch (error) {
