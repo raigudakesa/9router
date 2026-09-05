@@ -29,6 +29,13 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  try {
+    if (adapter?.close) adapter.close();
+    if (adapter?.dispose) adapter.dispose();
+  } catch { /* best effort */ }
+  // driver.js caches the adapter on globalThis; without clearing it the sqlite
+  // file stays locked and temp-dir cleanup fails on Windows.
+  try { globalThis._dbAdapter = { instance: null, initPromise: null, logged: false }; } catch {}
   if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
   if (originalDataDir === undefined) delete process.env.DATA_DIR;
   else process.env.DATA_DIR = originalDataDir;
@@ -132,9 +139,11 @@ describe("backupDbLite — excludes requestDetails, keeps critical data", () => 
     const dest = backupDbLite(adapter, backupDir);
     expect(fs.existsSync(dest)).toBe(true);
 
-    // Open backup and assert requestDetails is empty, settings present
-    const Database = (await import("better-sqlite3")).default;
-    const bak = new Database(dest);
+    // Open backup and assert requestDetails is empty, settings present.
+    // Prefer node:sqlite when available (better-sqlite3 is an optional native
+    // dep that may not have compiled bindings on this machine).
+    const sqlite = await import("node:sqlite").catch(() => null);
+    const bak = sqlite ? new sqlite.DatabaseSync(dest) : new (await import("better-sqlite3")).default(dest);
     try {
       // requestDetails is fully excluded — table must not exist in the backup
       const rdTable = bak.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='requestDetails'").get();

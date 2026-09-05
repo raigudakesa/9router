@@ -12,11 +12,21 @@ async function setupDb() {
 
   const { createProviderNode } = await import("@/models/index.js");
   const { getModelInfo } = await import("@/sse/services/model.js");
+  const { getAdapter } = await import("@/lib/db/driver.js");
+  const adapter = await getAdapter();
 
   return {
     createProviderNode,
     getModelInfo,
+    adapter,
     cleanup() {
+      try {
+        if (adapter?.close) adapter.close();
+        if (adapter?.dispose) adapter.dispose();
+      } catch { /* best effort */ }
+      // driver.js caches the adapter on globalThis; resetModules() alone won't
+      // clear it, so drop it here to release the sqlite file handle.
+      try { globalThis._dbAdapter = { instance: null, initPromise: null, logged: false }; } catch {}
       fs.rmSync(tempDir, { recursive: true, force: true });
     },
   };

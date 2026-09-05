@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, it, expect, afterEach, vi } from "vitest";
 
 const originalDataDir = process.env.DATA_DIR;
+let adapter;
 
 async function setup() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "9router-custom-headers-api-"));
@@ -23,6 +24,8 @@ async function setup() {
   const { PUT } = await import("@/app/api/provider-nodes/[id]/route.js");
   const { createProviderNode, getProviderConnections, getProviderNodeById } =
     await import("@/models/index.js");
+  const { getAdapter } = await import("@/lib/db/driver.js");
+  adapter = await getAdapter();
   return {
     POST_CONN, PUT, createProviderNode, getProviderConnections, getProviderNodeById,
     cleanup() { fs.rmSync(tempDir, { recursive: true, force: true }); },
@@ -31,6 +34,14 @@ async function setup() {
 
 let cleanup = () => {};
 afterEach(() => {
+  try {
+    if (adapter?.close) adapter.close();
+    if (adapter?.dispose) adapter.dispose();
+    adapter = null;
+  } catch { /* best effort */ }
+  // driver.js caches the adapter on globalThis; resetModules() alone doesn't
+  // clear it, so without this the next test would reuse a closed database.
+  try { globalThis._dbAdapter = { instance: null, initPromise: null, logged: false }; } catch {}
   vi.doUnmock("next/server");
   vi.resetModules();
   vi.clearAllMocks();

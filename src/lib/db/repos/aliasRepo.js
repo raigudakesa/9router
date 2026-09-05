@@ -30,14 +30,20 @@ export async function getCustomModels() {
   return Object.values(all);
 }
 
-// Atomic check-then-insert inside transaction to prevent duplicate races
+// Atomic upsert inside transaction to prevent duplicate races.
+// Re-adding an existing model updates caps/name without resetting omitted fields.
 export async function addCustomModel({ providerAlias, id, type = "llm", name, caps }) {
   const k = customKey(providerAlias, id, type);
   const db = await getAdapter();
   let added = false;
   db.transaction(() => {
-    const row = db.get(`SELECT 1 FROM kv WHERE scope = 'customModels' AND key = ?`, [k]);
-    if (row) return;
+    const row = db.get(`SELECT value FROM kv WHERE scope = 'customModels' AND key = ?`, [k]);
+    if (row) {
+      const prev = parseJson(row.value) || {};
+      const next = { ...prev, ...(name ? { name } : {}), ...(caps ? { caps } : {}) };
+      db.run(`UPDATE kv SET value = ? WHERE scope = 'customModels' AND key = ?`, [stringifyJson(next), k]);
+      return;
+    }
     const record = { providerAlias, id, type, name: name || id };
     // Persist user-declared capabilities (vision/reasoning/...) when provided so
     // the runtime resolver can lift the model above the text-only default.

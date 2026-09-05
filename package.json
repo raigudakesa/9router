@@ -1,6 +1,6 @@
 {
   "name": "9router-app",
-  "version": "0.5.59",
+  "version": "0.5.65",
   "description": "9Router web dashboard",
   "private": true,
   "scripts": {
@@ -61,5 +61,9 @@
     "eslint-config-next": "16.1.6",
     "postcss": "^8.5.6",
     "tailwindcss": "^4"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "unrs-resolver@1.12.2": true
   }
 }

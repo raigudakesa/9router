@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import PropTypes from "prop-types";
 import { Card, Button, Input, Modal, CardSkeleton, Toggle, ConfirmModal, Select } from "@/shared/components";
+import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider, getProviderAlias, FREE_PROVIDERS, AI_PROVIDERS, resolveProviderId } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import {
   TUNNEL_BENEFITS,
@@ -17,6 +18,169 @@ import EndpointRow from "./components/EndpointRow";
 import StatusAlert from "./components/StatusAlert";
 import Tooltip from "./components/Tooltip";
 import SecurityWarning from "./components/SecurityWarning";
+
+// ── ModelChipPicker ─────────────────────────────────────────────
+// Chip-based model/combo multi-pick shared by the API-key form and the model
+// preset form (pattern mirrors the "add model" modal used on the combos page).
+// Rules:
+//  • Empty search → only the currently-checked entries are shown (the working
+//    set); search is how additional models get added.
+//  • Non-empty search → every match is shown, grouped by provider, checked ones
+//    floated to the top of their group.
+//  • Click to toggle. The stored key is the model's routable value (routedModel
+//    / node-prefixed id for custom nodes) — unchanged from the checkbox UI.
+function ModelChipPicker({ models, combos, nodePrefixById, checkedKeys, search, onToggle, isCustomModelEntry, modelKeyOf, displayKeyOf, activeProviderIds = null }) {
+  const checked = (key) => checkedKeys.includes(key);
+  const isCustom = (m) => isCustomModelEntry(m);
+  const labelFor = (m) => displayKeyOf(m) || modelKeyOf(m);
+
+  // Free providers that need no auth key are always selectable (matches the
+  // combos model-selector behavior). When activeProviderIds is null the gate is
+  // off (nothing to compare against yet). Custom-node rows are keyed by node id
+  // in activeProviderIds but carry provider = display prefix.
+  const alwaysShowProviders = new Set(
+    Object.values(FREE_PROVIDERS).filter((p) => p.noAuth).map((p) => p.id)
+  );
+  const providerAllowed = (provider, m) => {
+    // A checked model stays listed even if its provider is no longer active,
+    // so editing a key/preset never silently drops existing selections.
+    if (checked(modelKeyOf(m))) return true;
+    if (!activeProviderIds) return true;
+    // /api/models rows carry the registry provider id; connections may use the
+    // same id or its short alias — normalize both sides before comparing.
+    const modelProvider = m?.providerNodeId || resolveProviderId(provider);
+    if (activeProviderIds.has(modelProvider)) return true;
+    return alwaysShowProviders.has(modelProvider);
+  };
+
+  const modelMatches = (m) => {
+    const q = (search || "").toLowerCase();
+    if (!q) return checked(modelKeyOf(m));
+    const key = modelKeyOf(m) || "";
+    const name = m.name || "";
+    return key.toLowerCase().includes(q) || String(name).toLowerCase().includes(q);
+  };
+  const comboMatches = (c) => {
+    const q = (search || "").toLowerCase();
+    if (!q) return checked(c.name);
+    return String(c.name || "").toLowerCase().includes(q);
+  };
+
+  const visibleCombos = combos.filter(comboMatches);
+  const visibleModels = models.filter(modelMatches);
+
+  // Group visible models by provider (display name from node prefix map when custom).
+  const groups = {};
+  const providerOrder = [];
+  for (const m of visibleModels) {
+    const provider = m.provider || "other";
+    // Built-in provider models only show when that provider is connected
+    // (or is a free no-auth provider); custom-node rows always show.
+    if (!providerAllowed(provider, m)) continue;
+    if (!groups[provider]) {
+      providerOrder.push(provider);
+      groups[provider] = { models: [] };
+    }
+    groups[provider].models.push(m);
+  }
+  for (const provider of providerOrder) {
+    const added = groups[provider].models.filter((m) => checked(modelKeyOf(m)));
+    const rest = groups[provider].models.filter((m) => !checked(modelKeyOf(m)));
+    added.sort((a, b) => (labelFor(a) || "").localeCompare(labelFor(b) || ""));
+    rest.sort((a, b) => (labelFor(a) || "").localeCompare(labelFor(b) || ""));
+    groups[provider].models = search ? [...added, ...rest] : added;
+    if (groups[provider].models.length === 0) {
+      delete groups[provider];
+      providerOrder.splice(providerOrder.indexOf(provider), 1);
+    }
+  }
+
+  const providerName = (provider, m) => {
+    // Custom compatible nodes carry their node's display name + prefix on the
+    // row (added by /api/models); fall back to the registry display name, then
+    // the prefix map, then the raw alias.
+    const nodeName = m?.providerName;
+    if (nodeName) return nodeName;
+    const reg = AI_PROVIDERS[resolveProviderId(provider)]?.name;
+    if (reg) return reg;
+    const prefix = nodePrefixById[provider];
+    if (prefix) return prefix;
+    return getProviderAlias(provider) || provider;
+  };
+
+  const chip = (value, label, opts = {}) => {
+    const isOn = checked(value);
+    return (
+      <button
+        key={value}
+        type="button"
+        onClick={() => onToggle(value)}
+        className={`inline-flex items-center gap-1 px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer ${isOn
+          ? "bg-primary text-white border-primary"
+          : "bg-surface border-border text-text-main hover:border-primary/50 hover:bg-primary/5"}`}
+      >
+        {isOn && <span className="material-symbols-outlined leading-none" style={{ fontSize: "10px" }}>check</span>}
+        {label}
+        {opts.isCustom && <span className="text-[9px] opacity-70 font-normal uppercase">custom</span>}
+        {opts.isCombo && <span className="text-[9px] opacity-70 font-normal uppercase">combo</span>}
+      </button>
+    );
+  };
+
+  const hasAny = visibleCombos.length > 0 || providerOrder.length > 0;
+
+  return (
+    <div className="max-h-[40vh] overflow-y-auto custom-scrollbar border border-border rounded-lg p-2 bg-surface-2/50">
+      {visibleCombos.length > 0 && (
+        <div className="mb-2">
+          <div className="flex items-center gap-1.5 mb-1.5 sticky top-0 bg-surface-2/95 py-0.5 z-10">
+            <span className="material-symbols-outlined text-primary text-[14px]">layers</span>
+            <span className="text-xs font-medium text-primary">Combos</span>
+            <span className="text-[10px] text-text-muted">({visibleCombos.length})</span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {visibleCombos.map((combo) => chip(combo.name, combo.name, { isCombo: true }))}
+          </div>
+        </div>
+      )}
+
+      {providerOrder.map((provider) => {
+        const groupModels = groups[provider].models;
+        const title = providerName(provider, groupModels[0]);
+        return (
+          <div key={provider} className="mb-2 last:mb-0">
+            <div className="flex items-center gap-1.5 mb-1.5 sticky top-0 bg-surface-2/95 py-0.5 z-10">
+              <span className="text-xs font-medium text-primary">{title}</span>
+              <span className="text-[10px] text-text-muted">({groupModels.length})</span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {groupModels.map((m) => chip(modelKeyOf(m), labelFor(m), { isCustom: isCustom(m) }))}
+            </div>
+          </div>
+        );
+      })}
+
+      {!hasAny && (
+        <p className="text-xs text-text-muted text-center py-3">
+          {search ? "No models match your search." : "No models selected — search to add models."}
+        </p>
+      )}
+    </div>
+  );
+}
+
+ModelChipPicker.propTypes = {
+  models: PropTypes.array,
+  combos: PropTypes.array,
+  nodePrefixById: PropTypes.object,
+  checkedKeys: PropTypes.array,
+  search: PropTypes.string,
+  onToggle: PropTypes.func.isRequired,
+  isCustomModelEntry: PropTypes.func.isRequired,
+  modelKeyOf: PropTypes.func.isRequired,
+  displayKeyOf: PropTypes.func.isRequired,
+  activeProviderIds: PropTypes.instanceOf(Set),
+};
 export default function APIPageClient({ machineId }) {
   const [keys, setKeys] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -30,6 +194,8 @@ export default function APIPageClient({ machineId }) {
   const [keyForm, setKeyForm] = useState({ name: "", allowedModels: null, expiresAt: null });
   const [allModels, setAllModels] = useState([]);
   const [combos, setCombos] = useState([]);
+  const [nodePrefixById, setNodePrefixById] = useState({});
+  const [activeProviderIds, setActiveProviderIds] = useState(null);
   const [keyPresets, setKeyPresets] = useState([]);
   const [presetName, setPresetName] = useState("");
   const [savingPreset, setSavingPreset] = useState(false);
@@ -116,7 +282,19 @@ export default function APIPageClient({ machineId }) {
   useEffect(() => {
     fetchData();
     loadSettings();
+    // eslint-disable-next-line react-hooks/immutability -- mount-once; function is a stable reference defined below
     loadModelsAndPresets();
+  }, []);
+
+  // Custom models are added/deleted on the provider pages, which dispatch
+  // "customModelChanged". Keep the picker's model list in sync so a deleted
+  // model disappears and a newly-added one becomes searchable without a reload.
+  useEffect(() => {
+    const onCustomModelChanged = () => {
+      loadModelsAndPresets();
+    };
+    window.addEventListener("customModelChanged", onCustomModelChanged);
+    return () => window.removeEventListener("customModelChanged", onCustomModelChanged);
   }, []);
 
   // Status poll: only while degraded (not yet reachable). Stop once healthy to avoid spam.
@@ -641,10 +819,12 @@ export default function APIPageClient({ machineId }) {
 
   const loadModelsAndPresets = async () => {
     try {
-      const [modelsRes, combosRes, presetsRes] = await Promise.all([
+      const [modelsRes, combosRes, presetsRes, nodesRes, providersRes] = await Promise.all([
         fetch("/api/models", { cache: "no-store" }),
         fetch("/api/combos", { cache: "no-store" }),
         fetch("/api/key-presets", { cache: "no-store" }),
+        fetch("/api/provider-nodes", { cache: "no-store" }),
+        fetch("/api/providers", { cache: "no-store" }),
       ]);
       if (modelsRes.ok) {
         const data = await modelsRes.json();
@@ -668,9 +848,55 @@ export default function APIPageClient({ machineId }) {
         const data = await presetsRes.json();
         setKeyPresets(data.presets || []);
       }
+      if (nodesRes.ok) {
+        const data = await nodesRes.json();
+        // Map compatible-node id -> display prefix so model pickers can label
+        // custom models as "prefix/id" (the form clients actually request)
+        // instead of the raw generated node id.
+        const map = {};
+        for (const node of data.nodes || []) {
+          if (node?.id && node?.prefix) map[node.id] = node.prefix;
+        }
+        setNodePrefixById(map);
+      }
+      if (providersRes.ok) {
+        const data = await providersRes.json();
+        // Only providers with an active connection are selectable (matches the
+        // combos model-selector). Normalize aliases to canonical provider ids so
+        // they line up with /api/models rows. null while loading = no gating.
+        const active = new Set();
+        for (const conn of data.connections || []) {
+          if (conn?.provider && conn.isActive !== false) active.add(resolveProviderId(conn.provider));
+        }
+        setActiveProviderIds(active);
+      }
     } catch (error) {
       console.log("Error loading models/presets:", error);
     }
+  };
+
+  // Model-picker helpers. /api/models exposes custom compatible-node models with
+  // `providerNodeId` set (and provider = the display prefix). Built-in registry
+  // providers (openrouter, cx, …) never carry that field, so it cleanly
+  // separates user-added custom-node models from stock ones.
+  const isCustomModelEntry = (m) => {
+    if (m?.providerNodeId) return true;
+    if (!m?.provider) return false;
+    return isOpenAICompatibleProvider(m.provider)
+      || isAnthropicCompatibleProvider(m.provider)
+      || isCustomEmbeddingProvider(m.provider);
+  };
+
+  const modelKeyOf = (m) => m?.routedModel || m?.fullModel || (m?.provider && m?.model ? `${m.provider}/${m.model}` : null);
+
+  // The routable display form for a model row: custom nodes use "prefix/model",
+  // everything else keeps its existing routedModel.
+  const displayKeyOf = (m) => {
+    const key = modelKeyOf(m);
+    if (!key || !m?.provider) return key;
+    const prefix = nodePrefixById[m.provider];
+    if (!prefix || !key.startsWith(`${m.provider}/`)) return key;
+    return `${prefix}${key.slice(m.provider.length)}`;
   };
 
   // Opens the create-key modal with an optional preset pre-applied.
@@ -1453,58 +1679,18 @@ export default function APIPageClient({ machineId }) {
                     </button>
                   )}
                 </div>
-                <div className="max-h-[40vh] overflow-y-auto custom-scrollbar border border-border rounded-lg p-2 flex flex-col gap-0.5 bg-surface-2/50">
-                  {combos
-                    .filter((combo) => !modelSearch || combo.name.toLowerCase().includes(modelSearch.toLowerCase()))
-                    .map((combo) => {
-                      const checked = Array.isArray(keyForm.allowedModels) && keyForm.allowedModels.includes(combo.name);
-                      return (
-                        <label
-                          key={`combo-${combo.id}`}
-                          className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleAllowedModel(combo.name)}
-                            className="accent-[var(--brand-500)]"
-                          />
-                          <span className="text-xs font-mono text-primary">{combo.name}</span>
-                          <span className="text-[10px] px-1 py-0.5 rounded bg-surface-2 text-text-muted ml-auto shrink-0">combo</span>
-                        </label>
-                      );
-                    })}
-                  {allModels
-                    .filter((m) => {
-                      const modelKey = m.routedModel || m.fullModel || `${m.provider}/${m.model}`;
-                      return !modelSearch || modelKey.toLowerCase().includes(modelSearch.toLowerCase());
-                    })
-                    .map((m) => {
-                      const modelKey = m.routedModel || m.fullModel || `${m.provider}/${m.model}`;
-                      const checked = Array.isArray(keyForm.allowedModels) && keyForm.allowedModels.includes(modelKey);
-                      return (
-                        <label
-                          key={modelKey}
-                          className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleAllowedModel(modelKey)}
-                            className="accent-[var(--brand-500)]"
-                          />
-                          <span className="text-xs font-mono">{modelKey}</span>
-                        </label>
-                      );
-                    })}
-                  {combos.filter((combo) => !modelSearch || combo.name.toLowerCase().includes(modelSearch.toLowerCase())).length === 0 &&
-                    allModels.filter((m) => {
-                      const modelKey = m.routedModel || m.fullModel || `${m.provider}/${m.model}`;
-                      return !modelSearch || modelKey.toLowerCase().includes(modelSearch.toLowerCase());
-                    }).length === 0 && (
-                      <p className="text-xs text-text-muted text-center py-3">No models match &quot;{modelSearch}&quot;</p>
-                    )}
-                </div>
+                <ModelChipPicker
+                  models={allModels}
+                  combos={combos}
+                  nodePrefixById={nodePrefixById}
+                  checkedKeys={Array.isArray(keyForm.allowedModels) ? keyForm.allowedModels : []}
+                  search={modelSearch}
+                  onToggle={toggleAllowedModel}
+                  isCustomModelEntry={isCustomModelEntry}
+                  modelKeyOf={modelKeyOf}
+                  displayKeyOf={displayKeyOf}
+                  activeProviderIds={activeProviderIds}
+                />
               </>
             )}
           </div>
@@ -1788,51 +1974,18 @@ export default function APIPageClient({ machineId }) {
             <p className="text-xs text-text-muted">
               Select the models and combos to include in this preset.
             </p>
-            <div className="max-h-[40vh] overflow-y-auto custom-scrollbar border border-border rounded-lg p-2 flex flex-col gap-0.5 bg-surface-2/50">
-              {combos
-                .filter((combo) => !presetSearch || combo.name.toLowerCase().includes(presetSearch.toLowerCase()))
-                .map((combo) => {
-                  const checked = presetDraft.includes(combo.name);
-                  return (
-                    <label
-                      key={`preset-combo-${combo.id}`}
-                      className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => togglePresetModel(combo.name)}
-                        className="accent-[var(--brand-500)]"
-                      />
-                      <span className="text-xs font-mono text-primary">{combo.name}</span>
-                      <span className="text-[10px] px-1 py-0.5 rounded bg-surface-2 text-text-muted ml-auto shrink-0">combo</span>
-                    </label>
-                  );
-                })}
-              {allModels
-                .filter((m) => {
-                  const modelKey = m.routedModel || m.fullModel || `${m.provider}/${m.model}`;
-                  return !presetSearch || modelKey.toLowerCase().includes(presetSearch.toLowerCase());
-                })
-                .map((m) => {
-                  const modelKey = m.routedModel || m.fullModel || `${m.provider}/${m.model}`;
-                  const checked = presetDraft.includes(modelKey);
-                  return (
-                    <label
-                      key={`preset-model-${modelKey}`}
-                      className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => togglePresetModel(modelKey)}
-                        className="accent-[var(--brand-500)]"
-                      />
-                      <span className="text-xs font-mono">{modelKey}</span>
-                    </label>
-                  );
-                })}
-            </div>
+            <ModelChipPicker
+              models={allModels}
+              combos={combos}
+              nodePrefixById={nodePrefixById}
+              checkedKeys={presetDraft}
+              search={presetSearch}
+              onToggle={togglePresetModel}
+              isCustomModelEntry={isCustomModelEntry}
+              modelKeyOf={modelKeyOf}
+              displayKeyOf={displayKeyOf}
+              activeProviderIds={activeProviderIds}
+            />
           </div>
 
           <div className="flex gap-2">
