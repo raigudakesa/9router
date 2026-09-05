@@ -60,39 +60,6 @@ async function warmCustomModelCaps() {
   }
 }
 
-// Combo routing (reorderByCapabilities / capacity-adapter) decides member ORDER by
-// calling getCapabilitiesForModel BEFORE any member reaches chatCore — where custom
-// caps normally get registered. On a cold registry that makes a custom vision/reasoning
-// model look text-only, so it wouldn't be floated for an image/thinking request. Warm
-// the engine-side caps registry from the DB up front so those decisions see user caps.
-// Short TTL cache: cheap kv scan, refreshed lazily; fail-open (never blocks a request).
-let _customCapsWarmedAt = 0;
-const CUSTOM_CAPS_WARM_TTL_MS = 5000;
-async function warmCustomModelCaps() {
-  if (Date.now() - _customCapsWarmedAt < CUSTOM_CAPS_WARM_TTL_MS) return;
-  _customCapsWarmedAt = Date.now();
-  try {
-    const models = await getCustomModels();
-    for (const m of models) {
-      if (!m?.providerAlias || !m?.id || !m?.caps) continue;
-      // Compatible-provider rows are stored under the generated node id, but model
-      // strings use the display prefix. registerCustomModelCaps keys by an exact
-      // provider string, so register under BOTH the node id AND (when different)
-      // the prefix so lookups that pass either one (chatCore passes the id; combo
-      // string keys pass the prefix) both find the declared caps.
-      const node = await findProviderNode(m.providerAlias);
-      const keys = [m.providerAlias];
-      if (node) {
-        keys.push(node.id);
-        if (node.prefix && node.prefix !== node.id) keys.push(node.prefix);
-      }
-      for (const k of keys) registerCustomModelCaps(k, m.id, m.caps);
-    }
-  } catch {
-    // fail-open: cold registry just means caps warm up on first routed request
-  }
-}
-
 /**
  * Handle chat completion request
  * Supports: OpenAI, Claude, Gemini, OpenAI Responses API formats
