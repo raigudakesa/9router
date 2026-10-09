@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getApiKeys, createApiKey } from "@/lib/localDb";
+import { validateKeyAccessInput } from "@/shared/utils/keyAccess.js";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
 
 export const dynamic = "force-dynamic";
@@ -19,20 +20,22 @@ export async function GET() {
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { name, allowedModels, expiresAt } = body;
+    const { name, access, expiresAt } = body;
 
     if (!name) {
       return NextResponse.json({ error: "Name is required" }, { status: 400 });
     }
-
-    const models = Array.isArray(allowedModels)
-      ? allowedModels.filter((m) => typeof m === "string" && m.trim() !== "")
-      : null;
+    const checked = access === undefined
+      ? { ok: true, value: { restricted: false, allow: [] } }
+      : validateKeyAccessInput(access);
+    if (!checked.ok) {
+      return NextResponse.json({ error: checked.error }, { status: 400 });
+    }
 
     // Always get machineId from server
     const machineId = await getConsistentMachineId();
     const apiKey = await createApiKey(name, machineId, {
-      allowedModels: models,
+      access: checked.value,
       expiresAt: expiresAt || null,
     });
 
@@ -41,7 +44,7 @@ export async function POST(request) {
       name: apiKey.name,
       id: apiKey.id,
       machineId: apiKey.machineId,
-      allowedModels: apiKey.allowedModels,
+      access: apiKey.access,
       expiresAt: apiKey.expiresAt,
     }, { status: 201 });
   } catch (error) {

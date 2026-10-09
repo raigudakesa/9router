@@ -6,8 +6,9 @@ import {
   isAnthropicCompatibleProvider,
   isOpenAICompatibleProvider,
 } from "@/shared/constants/providers";
-import { getProviderConnections, getCombos, getCustomModels, getModelAliases, getApiKeyByKey, isModelAllowedForKey, isKeyExpired } from "@/lib/localDb";
+import { getProviderConnections, getCombos, getCustomModels, getModelAliases, getApiKeyByKey, isKeyExpired } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
+import { getKeyAccessContext, filterModelsListForKey } from "@/sse/services/keyAccess.js";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
 import { resolveQoderModels, routableQoderModels } from "open-sse/services/qoderModels.js";
@@ -651,16 +652,13 @@ export async function GET(request) {
   try {
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
-
-    // Per-key auth: when an API key is presented, it must be valid (active +
-    // not expired) even for loopback requests. Localhost bypass in dashboardGuard
-    // only covers "no key" — a presented expired key is rejected.
+    // Per-key auth: a presented key must be valid (active + not expired), even for
+    // loopback requests. Localhost bypass in dashboardGuard only covers "no key".
     const auth = request?.headers?.get("Authorization") || request?.headers?.get("x-api-key");
-    let keyRow = null;
     if (auth) {
       const keyValue = auth.startsWith("Bearer ") ? auth.slice(7) : auth;
       try {
-        keyRow = await getApiKeyByKey(keyValue);
+        const keyRow = await getApiKeyByKey(keyValue);
         if (!keyRow || keyRow.isActive === false || isKeyExpired(keyRow.expiresAt)) {
           return Response.json(
             { error: { message: "Invalid API key", type: "authentication_error", code: "invalid_api_key" } },
@@ -672,14 +670,10 @@ export async function GET(request) {
       }
     }
 
-    let data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
-
-    // Per-key model allow-list: when the caller presents a key with a restricted
-    // model set, only expose the allowed models/combos.
-    if (keyRow && Array.isArray(keyRow.allowedModels) && keyRow.allowedModels.length > 0) {
-      data = data.filter((m) => m?.id && isModelAllowedForKey(keyRow, m.id));
-    }
-
+    const data = await filterModelsListForKey(
+      await getKeyAccessContext(request),
+      await buildModelsList([LLM_KIND], { skipDynamicFetch })
+    );
     return Response.json({ object: "list", data }, {
       headers: { "Access-Control-Allow-Origin": "*" },
     });

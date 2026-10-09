@@ -34,36 +34,23 @@ afterAll(() => {
 });
 
 describe("api key permissions", () => {
-  it("isModelAllowedForKey: null allows all, empty denies all", () => {
-    expect(db.isModelAllowedForKey({ allowedModels: null }, "anything/model-x")).toBe(true);
-    expect(db.isModelAllowedForKey({ allowedModels: [] }, "anything/model-x")).toBe(false);
-    expect(db.isModelAllowedForKey(null, "m")).toBe(false);
-  });
-
-  it("isModelAllowedForKey: matches full, bare, and combo entries", () => {
-    const row = { allowedModels: ["openai/gpt-4o", "my-combo"] };
-    expect(db.isModelAllowedForKey(row, "gpt-4o")).toBe(true);
-    expect(db.isModelAllowedForKey(row, "openai/gpt-4o")).toBe(true);
-    expect(db.isModelAllowedForKey(row, "my-combo")).toBe(true);
-    expect(db.isModelAllowedForKey(row, "claude-3-5-sonnet")).toBe(false);
-  });
-
   it("isKeyExpired: past expiry is expired, future/null is not", () => {
     expect(db.isKeyExpired("2020-01-01T00:00:00.000Z")).toBe(true);
     expect(db.isKeyExpired("2999-01-01T00:00:00.000Z")).toBe(false);
     expect(db.isKeyExpired(null)).toBe(false);
   });
 
-  it("create/update round-trips allowedModels + expiresAt", async () => {
+  it("create/update round-trips access + expiresAt", async () => {
+    const access = { restricted: true, allow: ["openai/gpt-4o"] };
     const key = await db.createApiKey("Test Key", "machine-123", {
-      allowedModels: ["openai/gpt-4o"],
+      access,
       expiresAt: "2030-01-01T23:59:59.999Z",
     });
-    expect(key.allowedModels).toEqual(["openai/gpt-4o"]);
+    expect(key.access).toEqual(access);
     expect(key.expiresAt).toBe("2030-01-01T23:59:59.999Z");
 
     const fetched = await db.getApiKeyById(key.id);
-    expect(fetched.allowedModels).toEqual(["openai/gpt-4o"]);
+    expect(fetched.access).toEqual(access);
     expect(fetched.expiresAt).toBe("2030-01-01T23:59:59.999Z");
 
     // validateApiKey respects expiry

@@ -83,7 +83,9 @@ export const TABLES = {
       machineId: "TEXT",
       isActive: "INTEGER DEFAULT 1",
       createdAt: "TEXT NOT NULL",
-      allowedModels: "TEXT",
+      // Per-key access control. Existing allow-list/expiry data is migrated into access.
+      accessRestricted: "INTEGER DEFAULT 0",
+      accessAllow: "TEXT",
       expiresAt: "TEXT",
     },
     indexes: ["CREATE INDEX IF NOT EXISTS idx_ak_key ON apiKeys(key)"],

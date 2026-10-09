@@ -19,6 +19,7 @@ import EndpointRow from "./components/EndpointRow";
 import StatusAlert from "./components/StatusAlert";
 import Tooltip from "./components/Tooltip";
 import SecurityWarning from "./components/SecurityWarning";
+import KeyAccessControls from "./components/KeyAccessControls";
 
 // ── ModelChipPicker ─────────────────────────────────────────────
 // Chip-based model/combo multi-pick shared by the API-key form and the model
@@ -182,6 +183,7 @@ ModelChipPicker.propTypes = {
   displayKeyOf: PropTypes.func.isRequired,
   activeProviderIds: PropTypes.instanceOf(Set),
 };
+
 export default function APIPageClient({ machineId }) {
   const [keys, setKeys] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -192,7 +194,7 @@ export default function APIPageClient({ machineId }) {
 
   // Per-key model allow-list + expiry
   const [editingKey, setEditingKey] = useState(null);
-  const [keyForm, setKeyForm] = useState({ name: "", allowedModels: null, expiresAt: null });
+  const [keyForm, setKeyForm] = useState({ name: "", allow: null, expiresAt: null });
   const [allModels, setAllModels] = useState([]);
   const [combos, setCombos] = useState([]);
   const [nodePrefixById, setNodePrefixById] = useState({});
@@ -894,7 +896,7 @@ export default function APIPageClient({ machineId }) {
   // Opens the create-key modal with an optional preset pre-applied.
   const openCreateModal = (presetId) => {
     setEditingKey(null);
-    setKeyForm({ name: "", allowedModels: null, expiresAt: null });
+    setKeyForm({ name: "", allow: null, expiresAt: null });
     setPresetName("");
     setShowAddModal(true);
     if (presetId) applyPresetById(presetId);
@@ -904,7 +906,7 @@ export default function APIPageClient({ machineId }) {
     setEditingKey(key);
     setKeyForm({
       name: key.name || "",
-      allowedModels: Array.isArray(key.allowedModels) ? [...key.allowedModels] : null,
+      allow: key.access?.restricted ? [...(key.access.allow || [])] : null,
       expiresAt: key.expiresAt || null,
     });
     setPresetName("");
@@ -914,7 +916,7 @@ export default function APIPageClient({ machineId }) {
   const resetKeyModal = () => {
     setShowAddModal(false);
     setEditingKey(null);
-    setKeyForm({ name: "", allowedModels: null, expiresAt: null });
+    setKeyForm({ name: "", allow: null, expiresAt: null });
     setNewKeyName("");
     setPresetName("");
     setModelSearch("");
@@ -931,7 +933,7 @@ export default function APIPageClient({ machineId }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             name,
-            allowedModels: keyForm.allowedModels,
+            access: keyForm.allow ? { restricted: true, allow: keyForm.allow } : { restricted: false, allow: [] },
             expiresAt: keyForm.expiresAt,
           }),
         });
@@ -947,7 +949,7 @@ export default function APIPageClient({ machineId }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name,
-          allowedModels: keyForm.allowedModels,
+          access: keyForm.allow ? { restricted: true, allow: keyForm.allow } : { restricted: false, allow: [] },
           expiresAt: keyForm.expiresAt,
         }),
       });
@@ -957,7 +959,7 @@ export default function APIPageClient({ machineId }) {
         setCreatedKey(data.key);
         await fetchData();
         setNewKeyName("");
-        setKeyForm({ name: "", allowedModels: null, expiresAt: null });
+        setKeyForm({ name: "", allow: null, expiresAt: null });
         setShowAddModal(false);
       }
     } catch (error) {
@@ -1053,19 +1055,19 @@ export default function APIPageClient({ machineId }) {
 
   const applyPreset = (preset) => {
     if (!preset) {
-      setKeyForm((prev) => ({ ...prev, allowedModels: null }));
+      setKeyForm((prev) => ({ ...prev, allow: null }));
       return;
     }
-    setKeyForm((prev) => ({ ...prev, allowedModels: Array.isArray(preset.models) ? [...preset.models] : [] }));
+    setKeyForm((prev) => ({ ...prev, allow: Array.isArray(preset.models) ? [...preset.models] : [] }));
   };
 
   const toggleAllowedModel = (modelKey) => {
     setKeyForm((prev) => {
-      const current = Array.isArray(prev.allowedModels) ? [...prev.allowedModels] : [];
+      const current = Array.isArray(prev.allow) ? [...prev.allow] : [];
       const idx = current.indexOf(modelKey);
       if (idx !== -1) current.splice(idx, 1);
       else current.push(modelKey);
-      return { ...prev, allowedModels: current.length > 0 ? current : null };
+      return { ...prev, allow: current.length > 0 ? current : null };
     });
   };
 
@@ -1074,7 +1076,7 @@ export default function APIPageClient({ machineId }) {
     if (preset) {
       applyPreset(preset);
     } else {
-      setKeyForm((prev) => ({ ...prev, allowedModels: null }));
+      setKeyForm((prev) => ({ ...prev, allow: null }));
     }
     setShowPresetMenu(false);
   };
@@ -1114,6 +1116,25 @@ export default function APIPageClient({ machineId }) {
       }
     } catch (error) {
       console.log("Error toggling key:", error);
+    }
+  };
+
+  // Save a key's access (restricted flag + allow list).
+  const handleUpdateKeyAccess = async (id, access) => {
+    try {
+      const res = await fetch(`/api/keys/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.key) {
+        setKeys(prev => prev.map(k => k.id === id ? { ...k, access: data.key.access } : k));
+      } else {
+        console.log("Error updating key access:", data.error || res.status);
+      }
+    } catch (error) {
+      console.log("Error updating key access:", error);
     }
   };
 
@@ -1499,31 +1520,33 @@ export default function APIPageClient({ machineId }) {
             {keys.map((key) => (
               <div
                 key={key.id}
-                className={`group flex items-center justify-between py-3 border-b border-black/[0.03] dark:border-white/[0.03] last:border-b-0 ${key.isActive === false ? "opacity-60" : ""}`}
+                className={`group flex items-start justify-between gap-3 py-3 border-b border-black/[0.03] dark:border-white/[0.03] last:border-b-0 ${key.isActive === false ? "opacity-60" : ""}`}
               >
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium">{key.name}</p>
-                  <div className="flex items-center gap-2 mt-1">
-                    <code className="text-xs text-text-muted font-mono">
+                  <div className="flex items-center gap-2 mt-1 min-w-0 flex-wrap">
+                    <code className="text-xs text-text-muted font-mono break-all min-w-0">
                       {visibleKeys.has(key.id) ? key.key : maskKey(key.key)}
                     </code>
-                    <button
-                      onClick={() => toggleKeyVisibility(key.id)}
-                      className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
-                      title={visibleKeys.has(key.id) ? "Hide key" : "Show key"}
-                    >
-                      <span className="material-symbols-outlined text-[14px]">
-                        {visibleKeys.has(key.id) ? "visibility_off" : "visibility"}
-                      </span>
-                    </button>
-                    <button
-                      onClick={() => copy(key.key, key.id)}
-                      className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
-                    >
-                      <span className="material-symbols-outlined text-[14px]">
-                        {copied === key.id ? "check" : "content_copy"}
-                      </span>
-                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => toggleKeyVisibility(key.id)}
+                        className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
+                        title={visibleKeys.has(key.id) ? "Hide key" : "Show key"}
+                      >
+                        <span className="material-symbols-outlined text-[14px]">
+                          {visibleKeys.has(key.id) ? "visibility_off" : "visibility"}
+                        </span>
+                      </button>
+                      <button
+                        onClick={() => copy(key.key, key.id)}
+                        className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">
+                          {copied === key.id ? "check" : "content_copy"}
+                        </span>
+                      </button>
+                    </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1">
                     <p className="text-xs text-text-muted">
@@ -1542,17 +1565,29 @@ export default function APIPageClient({ machineId }) {
                           : `Expires ${new Date(key.expiresAt).toLocaleDateString("en-GB")}`}
                       </span>
                     )}
-                    {Array.isArray(key.allowedModels) && key.allowedModels.length > 0 && (
+                    {key.access?.restricted && key.access.allow.length > 0 && (
                       <span className="text-xs px-1.5 py-0.5 rounded bg-surface-2 text-text-muted">
-                        {key.allowedModels.length} model{key.allowedModels.length > 1 ? "s" : ""} allowed
+                        {key.access.allow.length} model{key.access.allow.length > 1 ? "s" : ""} allowed
                       </span>
                     )}
                   </div>
                   {key.isActive === false && (
                     <p className="text-xs text-orange-500 mt-1">Paused</p>
                   )}
+                  <KeyAccessControls
+                    apiKey={key}
+                    onChange={(access) => handleUpdateKeyAccess(key.id, access)}
+                    onRequestRestrict={() => setConfirmState({
+                      title: "Restrict API Key",
+                      message: `Restrict API key "${key.name}"?\n\nIt will only be able to call the combos and models you add. Until you add one, it can call nothing.`,
+                      onConfirm: async () => {
+                        setConfirmState(null);
+                        handleUpdateKeyAccess(key.id, { restricted: true, allow: key.access?.allow || [] });
+                      }
+                    })}
+                  />
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0 pt-0.5">
                   <button
                     onClick={() => openEditModal(key)}
                     className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
@@ -1631,11 +1666,11 @@ export default function APIPageClient({ machineId }) {
               <label className="text-sm font-medium text-text-main">
                 Allowed Models & Combos
               </label>
-              {keyForm.allowedModels && keyForm.allowedModels.length > 0 && (
+              {keyForm.allow && keyForm.allow.length > 0 && (
                 <Button
                   size="sm"
                   variant="ghost"
-                  onClick={() => setKeyForm((prev) => ({ ...prev, allowedModels: null }))}
+                  onClick={() => setKeyForm((prev) => ({ ...prev, allow: null }))}
                 >
                   Allow all models
                 </Button>
@@ -1675,7 +1710,7 @@ export default function APIPageClient({ machineId }) {
                   models={allModels}
                   combos={combos}
                   nodePrefixById={nodePrefixById}
-                  checkedKeys={Array.isArray(keyForm.allowedModels) ? keyForm.allowedModels : []}
+                  checkedKeys={Array.isArray(keyForm.allow) ? keyForm.allow : []}
                   search={modelSearch}
                   onToggle={toggleAllowedModel}
                   isCustomModelEntry={isCustomModelEntry}

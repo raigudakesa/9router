@@ -142,8 +142,8 @@ function importLegacyMain(adapter, data) {
 
   importWithAssertion(adapter, "apiKeys", data.apiKeys || [], (k) => {
     adapter.run(
-      `INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt, allowedModels, expiresAt) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
-      [k.id, k.key, k.name || null, k.machineId || null, k.isActive === false ? 0 : 1, k.createdAt || new Date().toISOString(), Array.isArray(k.allowedModels) ? stringifyJson(k.allowedModels) : null, k.expiresAt || null]
+      `INSERT OR REPLACE INTO apiKeys(id, key, name, machineId, isActive, createdAt, accessRestricted, accessAllow, expiresAt) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [k.id, k.key, k.name || null, k.machineId || null, k.isActive === false ? 0 : 1, k.createdAt || new Date().toISOString(), Array.isArray(k.allowedModels) && k.allowedModels.length > 0 ? 1 : 0, stringifyJson(Array.isArray(k.allowedModels) ? k.allowedModels : []), k.expiresAt || null]
     );
   }, (k) => ({ id: k.id ?? null, name: k.name ?? null }));
 
