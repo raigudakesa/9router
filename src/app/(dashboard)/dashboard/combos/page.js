@@ -967,7 +967,7 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
       ) : (
         <div
           className="min-w-0 flex-1 cursor-text truncate rounded px-1.5 py-0.5 font-mono text-xs text-text-main hover:bg-black/5 dark:hover:bg-white/5"
-          onClick={() => setEditing(true)}
+          onClick={() => { setDraft(model); setEditing(true); }}
           title="Click to edit"
         >
           {model}
