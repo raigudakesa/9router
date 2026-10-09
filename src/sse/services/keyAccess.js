@@ -33,6 +33,7 @@ import {
 } from "@/shared/constants/keyAccess.js";
 import { errorResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
+import { getCapacityAdapterConfig } from "open-sse/services/capacityAdapter.js";
 import * as log from "../utils/logger.js";
 
 const lower = (s) => String(s).toLowerCase();
@@ -169,17 +170,22 @@ export async function enforceKeyAccessProvider(ctx, requested, comboModels) {
 }
 
 /**
- * Capacity-adapter models are appended by the gateway, not chosen by the
- * client. For a restricted key keep only the adapter models the key may call
- * directly; the original targets (already gated) are always kept. Dropping a
- * model just shortens the fallback list, so combo failover is unaffected.
+ * Only gateway-selected vision/audio adapters bypass a restricted key's
+ * allow list. Original combo members are already covered by the combo gate;
+ * other adapter capabilities keep their existing allow-list check.
  */
-export async function filterAdapterModels(ctx, augmented, original) {
+export async function filterAdapterModels(ctx, augmented, original, requiredCapabilities, settings) {
   if (!ctx || !Array.isArray(augmented)) return augmented;
   const keep = new Set(original || []);
+  const exempt = new Set();
+  for (const cap of ["vision", "audioInput"]) {
+    if (!requiredCapabilities?.has(cap)) continue;
+    const pool = getCapacityAdapterConfig(cap, settings);
+    if (pool.enabled) for (const model of pool.models) exempt.add(model);
+  }
   const out = [];
   for (const m of augmented) {
-    if (keep.has(m) || await isModelStringAllowed(ctx, m)) out.push(m);
+    if (keep.has(m) || exempt.has(m) || await isModelStringAllowed(ctx, m)) out.push(m);
     else log.info("AUTH", `key-access: key "${ctx.keyName}" skips adapter model "${m}" (not allowed)`);
   }
   return out;

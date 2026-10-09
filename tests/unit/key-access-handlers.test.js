@@ -8,6 +8,7 @@ const fx = vi.hoisted(() => ({
     { id: "c1", name: "Main", models: ["openai/model-a", "openai/model-b"] },
   ],
   keys: {},
+  capacityAdapter: null,
 }));
 const mocks = vi.hoisted(() => ({
   getProviderCredentials: vi.fn(),
@@ -15,7 +16,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/localDb", () => ({
-  getSettings: async () => ({ requireApiKey: false, comboStrategy: "fallback" }),
+  getSettings: async () => ({ requireApiKey: false, comboStrategy: "fallback", capacityAdapter: fx.capacityAdapter }),
   getModelAliases: async () => ({}),
   getComboByName: async (name) => fx.combos.find((c) => c.name === name) || null,
   getProviderNodes: async () => [],
@@ -79,6 +80,7 @@ const post = (path, body, k, extra = {}) => new Request(`http://localhost${path}
 
 beforeEach(() => {
   vi.clearAllMocks();
+  fx.capacityAdapter = null;
   fx.keys = {
     "sk-open": { id: "o", name: "open", isActive: true, access: { restricted: false, allow: [] } },
     "sk-combo": { id: "c", name: "combo", isActive: true, access: { restricted: true, allow: ["Main"] } },
@@ -145,6 +147,29 @@ describe("chat (/v1/chat/completions, /v1/messages, /v1/responses all use handle
     expect(text).toContain("from-model-b");
     const tried = mocks.handleChatCore.mock.calls.map(([a]) => a.modelInfo.model);
     expect(tried).toEqual(["model-a", "model-b"]);
+  });
+  it.each([
+    ["vision", { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=" } }],
+    ["audioInput", { type: "input_audio", input_audio: { data: "aGVsbG8=", format: "wav" } }],
+  ])("restricted key routes %s input through unlisted adapter but denies direct calls", async (cap, media) => {
+    fx.capacityAdapter = { [cap]: { enabled: true, roundRobin: false, models: ["oc/mimo-v2.6-flash-free"] } };
+    const body = { model: "openai/model-b", stream: true, messages: [{ role: "user", content: [{ type: "text", text: "Describe" }, media] }] };
+    const r = await handleChat(post("/v1/chat/completions", body, "sk-b"));
+    expect(r.status).toBe(200);
+    expect(mocks.handleChatCore.mock.calls[0][0].modelInfo.model).toBe("mimo-v2.6-flash-free");
+    vi.clearAllMocks();
+    expect((await chat("oc/mimo-v2.6-flash-free", "sk-b")).status).toBe(403);
+    expect(mocks.getProviderCredentials).not.toHaveBeenCalled();
+  });
+  it("restricted combo uses the default vision adapter without listing it", async () => {
+    fx.capacityAdapter = { vision: { enabled: true, roundRobin: false, models: [] } };
+    const body = { model: "Main", stream: true, messages: [{ role: "user", content: [
+      { type: "text", text: "Describe" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=" } },
+    ] }] };
+    const r = await handleChat(post("/v1/chat/completions", body, "sk-combo"));
+    expect(r.status).toBe(200);
+    expect(mocks.handleChatCore.mock.calls[0][0].modelInfo.model).toBe("mimo-v2.6-flash-free");
   });
   it("bypass check: a restricted key sent as x-goog-api-key on the Gemini-compatible route is still restricted", async () => {
     const res = await geminiRoute.POST(

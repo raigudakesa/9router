@@ -208,6 +208,25 @@ describe("capacity-adapter models", () => {
     const ctxB = await ctxFor("sk-b");
     expect(await engine.filterAdapterModels(ctxB, ["openai/model-b", "openai/model-b"], ["openai/model-b"])).toEqual(["openai/model-b", "openai/model-b"]);
   });
+  it("keeps a vision/audio adapter model the key cannot call directly, only when that modality is required", async () => {
+    const ctx = await ctxFor("sk-b");
+    const settings = { capacityAdapter: {
+      vision: { enabled: true, roundRobin: false, models: ["oc/vision-x"] },
+      audioInput: { enabled: true, roundRobin: false, models: ["oc/audio-x"] },
+      pdf: { enabled: true, roundRobin: false, models: ["oc/pdf-x"] },
+    } };
+    const augmented = ["oc/vision-x", "openai/model-b"];
+    expect(await engine.filterAdapterModels(ctx, augmented, ["openai/model-b"], new Set(["vision"]), settings))
+      .toEqual(augmented);
+    expect(await engine.filterAdapterModels(ctx, ["oc/audio-x", "openai/model-b"], ["openai/model-b"], new Set(["audioInput"]), settings))
+      .toEqual(["oc/audio-x", "openai/model-b"]);
+    // Not required → dropped by the allow list, as before.
+    expect(await engine.filterAdapterModels(ctx, augmented, ["openai/model-b"], new Set(), settings))
+      .toEqual(["openai/model-b"]);
+    // Pdf pool is not exempt for a vision request.
+    expect(await engine.filterAdapterModels(ctx, ["oc/pdf-x", "openai/model-b"], ["openai/model-b"], new Set(["vision"]), settings))
+      .toEqual(["openai/model-b"]);
+   });
 });
 
 describe("helpers: storage + validation", () => {

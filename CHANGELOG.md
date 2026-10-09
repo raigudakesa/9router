@@ -27,6 +27,7 @@
 - **Ollama**: report `prompt_eval_cached_count` as cached tokens in usage tracking
 - **Muse**: route Responses-only models to declared transport and nest reasoning effort
 - **TTS**: accept server model and voice in self-hosted example
+- **API Keys**: allow gateway-selected vision and audio adapter models for restricted keys while keeping direct model access restricted
 
 # v0.5.95 (2026-10-01)
 
