@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { ALIAS_TO_ID } from "@/shared/constants/providers";
 
 // Module cache: one /api/models fetch shared by every useModelCaps instance.
 let cache = null; // { byFull, byId } | null
@@ -76,15 +77,17 @@ function loadModelCaps() {
 }
 
 // Resolve caps from a "provider/model" string or a bare model id.
-// `resolveProvider` maps a user display prefix to its node id so the custom-node
-// guard in getCapabilitiesForModel applies (custom nodes must not inherit the
-// base-model pattern caps of a different provider).
-function resolveCaps(byFull, byId, key, resolveProvider) {
+// The seat prefix may be a registry alias (ocg, cmc, …) or a custom-node
+// display prefix. Resolve both before capability lookup so custom nodes do not
+// inherit another provider's generic model-pattern capabilities.
+export function resolveCaps(byFull, byId, key, resolveProvider = (p) => p) {
   if (!key) return null;
   if (byFull[key]) return byFull[key];
   const bare = key.includes("/") ? key.slice(key.indexOf("/") + 1) : key;
   if (byId[bare]) return byId[bare];
-  const provider = resolveProvider(key.includes("/") ? key.slice(0, key.indexOf("/")) : null);
+  const alias = key.includes("/") ? key.slice(0, key.indexOf("/")) : null;
+  const resolvedProvider = resolveProvider(alias);
+  const provider = resolvedProvider ? (ALIAS_TO_ID[resolvedProvider] || resolvedProvider) : null;
   const c = getCapabilitiesForModel(provider, bare);
   return {
     vision: c.vision,

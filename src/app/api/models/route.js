@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getModelAliases, setModelAlias, getCustomModels, getProviderNodes } from "@/models";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { AI_MODELS } from "@/shared/constants/config";
-import { getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers";
+import { getProviderAlias, ALIAS_TO_ID, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 
 // True when the provider key is a user-defined compatible node (not a built-in
@@ -46,6 +46,14 @@ export async function GET() {
       });
 
     // Custom models ride along; their stored caps override the name heuristic.
+    // A custom row whose provider alias routes to an already-listed model is a
+    // pure shadow: the real entry wins (and is listed first), but this row would
+    // land later with the same routedModel key and the client's last-write-wins
+    // map then serves its thinner caps (a pre-registry "add custom model" row
+    // stores {vision, reasoning} only — no contextWindow). Drop the shadow and
+    // resolve the survivors' provider id, not the UI alias: the capability
+    // tables are keyed by provider id, and an alias like `ocg` misses the
+    // provider-scoped entries and falls back to the generic patterns.
     // Rows registered under a compatible node whose node row no longer exists
     // (node deleted) are orphans — drop them so deleted providers' models stop
     // reappearing in pickers. Rows for valid nodes are enriched with the node's
@@ -53,16 +61,19 @@ export async function GET() {
     const nodes = await getProviderNodes();
     const nodeById = new Map(nodes.map((n) => [n.id, n]));
     const seenFull = new Set(models.map((m) => m.fullModel));
+    const seenRouted = new Set(models.map((m) => m.routedModel));
     const customModels = (await getCustomModels()).filter((m) => {
       if (!m?.id || (m.kind || m.type || "llm") !== "llm") return false;
       if (isCompatibleNodeId(m.providerAlias) && !nodeById.has(m.providerAlias)) return false;
+      if (seenRouted.has(`${m.providerAlias}/${m.id}`)) return false;
       return !seenFull.has(`${m.providerAlias}/${m.id}`);
     });
     for (const m of customModels) {
       const node = nodeById.get(m.providerAlias);
+      const providerId = node ? node.id : (ALIAS_TO_ID[m.providerAlias] || m.providerAlias);
+      const capsProvider = node ? node.id : providerId;
+      const fullModel = node ? `${node.prefix || node.id}/${m.id}` : `${m.providerAlias}/${m.id}`;
       const provider = node ? node.prefix || node.id : m.providerAlias;
-      const capsProvider = node ? node.id : m.providerAlias;
-      const fullModel = `${provider}/${m.id}`;
       const c = getCapabilitiesForModel(capsProvider, m.id);
       models.push({
         provider,
