@@ -2,12 +2,13 @@
 
 import { useState, useEffect } from "react";
 import PropTypes from "prop-types";
-import { Button, Modal, Select, Toggle } from "@/shared/components";
+import { Button, Modal, Select } from "@/shared/components";
 import { CUSTOM_MODEL_CAP_OPTIONS, EMPTY_CUSTOM_MODEL_CAPS } from "@/shared/constants/customModelCaps";
 import { STT_TRANSPORT_META, STT_TRANSPORTS } from "@/shared/constants/models";
 
 export default function AddCustomModelModal({ isOpen, providerAlias, providerDisplayAlias, onSave, onClose }) {
   const [modelId, setModelId] = useState("");
+  const [modelType, setModelType] = useState("llm");
   const [testStatus, setTestStatus] = useState(null); // null | "testing" | "ok" | "error"
   const [testError, setTestError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -17,7 +18,7 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
 
   // Reset state when modal opens
   useEffect(() => {
-    if (isOpen) { setModelId(""); setCaps({ ...EMPTY_CUSTOM_MODEL_CAPS }); setTransport(""); setTestStatus(null); setTestError(""); }
+    if (isOpen) { setModelId(""); setCaps({ ...EMPTY_CUSTOM_MODEL_CAPS }); setModelType("llm"); setTransport(""); setTestStatus(null); setTestError(""); }
   }, [isOpen]);
 
   // Strip provider's own alias prefix (e.g. "cc/model" -> "model" for cc provider)
@@ -35,7 +36,7 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
       const res = await fetch("/api/models/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: `${providerAlias}/${cleanId}` }),
+        body: JSON.stringify({ model: `${providerAlias}/${cleanId}`, kind: modelType }),
       });
       const data = await res.json();
       setTestStatus(data.ok ? "ok" : "error");
@@ -51,9 +52,10 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
     if (!cleanId || saving) return;
     setSaving(true);
     try {
-      // caps.stt is UI-only; the parent save flow derives the model type from
-      // it and forwards the pinned transport (null unless the caller picked one).
-      await onSave(cleanId, { ...caps }, caps.stt ? transport : null);
+      // Explicit model type drives the save: caps belong to llm records only,
+      // the transport marker to stt ones. Signature matches page.js's
+      // handleAddCustomModel(modelId, type, alias, caps, transport).
+      await onSave(cleanId, modelType, modelType === "llm" ? caps : undefined, modelType === "stt" ? transport : null);
     } finally {
       setSaving(false);
     }
@@ -66,6 +68,25 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Add Custom Model">
       <div className="flex flex-col gap-4">
+        <Select
+          label="Model type"
+          value={modelType}
+          options={[
+            { value: "llm", label: "Chat / LLM" },
+            { value: "stt", label: "Speech to text (STT)" },
+          ]}
+          onChange={(e) => {
+            setModelType(e.target.value);
+            setCaps({ ...EMPTY_CUSTOM_MODEL_CAPS });
+            setTransport("");
+            setTestStatus(null);
+            setTestError("");
+          }}
+          disabled={saving || testStatus === "testing"}
+          hint={modelType === "llm"
+            ? "Chat models appear in this provider's Available Models."
+            : "Audio transcription models use /v1/audio/transcriptions."}
+        />
         <div>
           <label className="text-sm font-medium mb-1.5 block">Model ID</label>
           <div className="flex gap-2">
@@ -93,34 +114,16 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
           </p>
         </div>
 
-        {/* STT is a model TYPE, not a chat capability: the save flow turns this
-            flag into type "stt" (the API honours a transport only on stt
-            records). The select pins the realtime dispatch marker persisted
-            with the model; the whitelist is the shared STT_TRANSPORT_META.
-            (Capability toggles live in the local CUSTOM_MODEL_CAP_OPTIONS grid
-            below — upstream's CAPACITY_META toggle grid is intentionally not
-            duplicated here.) */}
-        <div>
-          <Toggle
-            checked={!!caps.stt}
-            onChange={(v) => { setCaps((prev) => ({ ...prev, stt: v })); if (!v) setTransport(""); }}
-            label="Speech to text"
-            description="Transcribes audio via /v1/audio/transcriptions"
-            size="sm"
+        {modelType === "stt" && (
+          <Select
+            label="Transport"
+            value={transport}
+            onChange={(e) => setTransport(e.target.value)}
+            placeholder="Provider default (REST)"
+            options={STT_TRANSPORTS.map((t) => ({ value: t, label: STT_TRANSPORT_META[t].label }))}
+            hint="Realtime transport marker for the STT dispatcher. Empty keeps the provider's REST format."
           />
-          {caps.stt && (
-            <div className="mt-3">
-              <Select
-                label="Transport"
-                value={transport}
-                onChange={(e) => setTransport(e.target.value)}
-                placeholder="Provider default (REST)"
-                options={STT_TRANSPORTS.map((t) => ({ value: t, label: STT_TRANSPORT_META[t].label }))}
-                hint="Realtime transport marker for the STT dispatcher. Empty keeps the provider's REST format."
-              />
-            </div>
-          )}
-        </div>
+        )}
 
         {/* Test result */}
         {testStatus === "ok" && (
@@ -137,27 +140,32 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
         )}
 
         {/* Capabilities — tell 9Router what this custom model can read/emit so the
-            runtime resolver lifts it above the text-only default. */}
-        <div>
-          <label className="text-sm font-medium mb-1.5 block">Capabilities</label>
-          <div className="grid grid-cols-2 gap-2">
-            {CUSTOM_MODEL_CAP_OPTIONS.map((opt) => (
-              <label key={opt.key} className="flex items-center gap-2 text-sm cursor-pointer select-none" title={opt.desc}>
-                <input
-                  type="checkbox"
-                  checked={!!caps[opt.key]}
-                  onChange={(e) => setCaps((prev) => ({ ...prev, [opt.key]: e.target.checked }))}
-                  className="w-4 h-4 accent-primary"
-                />
-                <span className="material-symbols-outlined text-base text-text-muted">{opt.icon}</span>
-                {opt.label}
-              </label>
-            ))}
+            runtime resolver lifts it above the text-only default. Only llm
+            records carry caps; STT records carry the transport marker instead.
+            This checkbox grid is the single caps UI for the modal (upstream's
+            CAPACITY_META toggle grid is intentionally not duplicated here). */}
+        {modelType === "llm" && (
+          <div>
+            <label className="text-sm font-medium mb-1.5 block">Capabilities</label>
+            <div className="grid grid-cols-2 gap-2">
+              {CUSTOM_MODEL_CAP_OPTIONS.map((opt) => (
+                <label key={opt.key} className="flex items-center gap-2 text-sm cursor-pointer select-none" title={opt.desc}>
+                  <input
+                    type="checkbox"
+                    checked={!!caps[opt.key]}
+                    onChange={(e) => setCaps((prev) => ({ ...prev, [opt.key]: e.target.checked }))}
+                    className="w-4 h-4 accent-primary"
+                  />
+                  <span className="material-symbols-outlined text-base text-text-muted">{opt.icon}</span>
+                  {opt.label}
+                </label>
+              ))}
+            </div>
+            <p className="text-xs text-text-muted mt-1">
+              Leave unchecked for a plain text model. Enable the modalities/features your model actually supports.
+            </p>
           </div>
-          <p className="text-xs text-text-muted mt-1">
-            Leave unchecked for a plain text model. Enable the modalities/features your model actually supports.
-          </p>
-        </div>
+        )}
 
         <div className="flex gap-2 pt-1">
           <Button onClick={onClose} variant="ghost" fullWidth size="sm">Cancel</Button>
