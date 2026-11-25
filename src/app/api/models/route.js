@@ -4,6 +4,7 @@ import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { AI_MODELS } from "@/shared/constants/config";
 import { getProviderAlias, ALIAS_TO_ID, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 
 // True when the provider key is a user-defined compatible node (not a built-in
 // registry alias like "openrouter" / "cx", which custom rows may also use).
@@ -30,11 +31,15 @@ export async function GET() {
         const providerAlias = getProviderAlias(m.provider) || m.provider;
         const routedModel = `${providerAlias}/${m.model}`;
         const c = getCapabilitiesForModel(m.provider, m.model);
+        const thinkingLevels = getThinkingLevels(m.provider, m.model);
         return {
           ...m,
           fullModel,
           routedModel,
           alias: modelAliases[fullModel] || m.model,
+          // Same per-model set /v1/models already publishes, so CLI-tool cards can
+          // seed thinking levels instead of guessing them (Pi, opencode).
+          ...(Array.isArray(thinkingLevels) && thinkingLevels.length > 0 ? { thinking_levels: thinkingLevels } : {}),
           caps: {
             vision: c.vision,
             search: c.search,
@@ -71,10 +76,10 @@ export async function GET() {
     for (const m of customModels) {
       const node = nodeById.get(m.providerAlias);
       const providerId = node ? node.id : (ALIAS_TO_ID[m.providerAlias] || m.providerAlias);
-      const capsProvider = node ? node.id : providerId;
       const fullModel = node ? `${node.prefix || node.id}/${m.id}` : `${m.providerAlias}/${m.id}`;
       const provider = node ? node.prefix || node.id : m.providerAlias;
-      const c = getCapabilitiesForModel(capsProvider, m.id);
+      const c = getCapabilitiesForModel(providerId, m.id);
+      const thinkingLevels = getThinkingLevels(providerId, m.id);
       models.push({
         provider,
         providerNodeId: node ? node.id : null,
@@ -84,6 +89,7 @@ export async function GET() {
         fullModel,
         routedModel: fullModel,
         alias: modelAliases[fullModel] || m.id,
+        ...(Array.isArray(thinkingLevels) && thinkingLevels.length > 0 ? { thinking_levels: thinkingLevels } : {}),
         caps: {
           vision: c.vision,
           search: c.search,
