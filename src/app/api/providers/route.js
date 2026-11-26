@@ -141,6 +141,7 @@ export async function POST(request) {
         baseUrl: node.baseUrl,
         nodeName: node.name,
         ...(node.customHeaders !== undefined ? { customHeaders: node.customHeaders } : {}),
+        ...(node.fallbackHeaders !== undefined ? { fallbackHeaders: node.fallbackHeaders } : {}),
       };
     } else if (isAnthropicCompatibleProvider(provider)) {
       const node = await getProviderNodeById(provider);
@@ -152,6 +153,7 @@ export async function POST(request) {
         baseUrl: node.baseUrl,
         nodeName: node.name,
         ...(node.customHeaders !== undefined ? { customHeaders: node.customHeaders } : {}),
+        ...(node.fallbackHeaders !== undefined ? { fallbackHeaders: node.fallbackHeaders } : {}),
       };
     } else if (isCustomEmbeddingProvider(provider)) {
       const node = await getProviderNodeById(provider);
@@ -163,6 +165,7 @@ export async function POST(request) {
         baseUrl: node.baseUrl,
         nodeName: node.name,
         ...(node.customHeaders !== undefined ? { customHeaders: node.customHeaders } : {}),
+        ...(node.fallbackHeaders !== undefined ? { fallbackHeaders: node.fallbackHeaders } : {}),
       };
     }
 

@@ -8,7 +8,7 @@ const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 const DEFAULTS = { name: "", value: "", ttlMinutes: null };
 
-export default function HeaderFormModal({ isOpen, mode, initial, existingNames = [], onSubmit, onClose }) {
+export default function HeaderFormModal({ isOpen, mode, initial, existingNames = [], onSubmit, onClose, showPersist = true }) {
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const [persist, setPersist] = useState(false);
@@ -35,7 +35,7 @@ export default function HeaderFormModal({ isOpen, mode, initial, existingNames =
   const handleSubmit = () => {
     if (!canSave) return;
     let ttlMinutes = null;
-    if (persist) ttlMinutes = minutes === "" ? 0 : Number(minutes);
+    if (showPersist && persist) ttlMinutes = minutes === "" ? 0 : Number(minutes);
     onSubmit({ name: trimmedName, value, ttlMinutes });
   };
 
@@ -70,10 +70,12 @@ export default function HeaderFormModal({ isOpen, mode, initial, existingNames =
           value={value}
           onChange={(e) => setValue(e.target.value)}
           placeholder="value or sess_{ralpha_num:26}"
-          hint="Dynamic tags {ralpha|lalpha|ualpha|num|symbol[_...][:length]}, {opencode_session}, copy via {header:Other}, or {remove} to delete a preset."
+          hint="Dynamic tags {ralpha|lalpha|ualpha|num|symbol[_...][:length]}, {opencode_session}, copy via {header:Other}, forward a client request header via {forward:Header-Name} (header is omitted when the source is missing/empty), or {remove} to delete a preset."
         />
-        <Toggle checked={persist} onChange={setPersist} label="Persist (reuse value per connection)" />
-        {persist && (
+        {showPersist && (
+          <Toggle checked={persist} onChange={setPersist} label="Persist (reuse value per connection)" />
+        )}
+        {showPersist && persist && (
           <Input
             label="Minutes (0 = permanent until restart)"
             type="number"
@@ -96,4 +98,5 @@ HeaderFormModal.propTypes = {
   existingNames: PropTypes.arrayOf(PropTypes.string),
   onSubmit: PropTypes.func.isRequired,
   onClose: PropTypes.func.isRequired,
+  showPersist: PropTypes.bool,
 };

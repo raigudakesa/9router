@@ -1,4 +1,4 @@
-import { getApiKeys } from "@/lib/localDb";
+import { getApiKeys, findProviderNode } from "@/lib/localDb";
 import { resolveProviderId } from "@/shared/constants/providers.js";
 import { getModelMeta } from "open-sse/config/providerModels.js";
 import { unwrapClineEnvelope } from "open-sse/shared/clineEnvelope.js";
@@ -191,19 +191,20 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
     return { ok: true, latencyMs, error: null, status: res.status };
   }
 
+  // Compatible nodes may carry a custom test payload (edited in the node modal).
+  // It is layered over the default probe; model/stream stay authoritative.
+  const node = await findProviderNode(String(model).split("/")[0]).catch(() => null);
+  const probeBody = {
+    max_tokens: 1024,
+    messages: [{ role: "user", content: "hi" }],
+    ...(node?.testPayload && typeof node.testPayload === "object" ? node.testPayload : {}),
+    model,
+    stream: false,
+  };
   const res = await fetch(`${baseUrl}/api/v1/chat/completions`, {
     method: "POST",
     headers,
-    body: JSON.stringify({
-      model,
-      // 1024 tokens: reasoning models (ClinePass/kimi-k3, deepseek-v4-pro, etc.) spend
-      // their budget on chain-of-thought before emitting an answer. A tiny probe like
-      // max_tokens:16 starves the answer and yields a false "no choices" failure.
-      // See issue #3010.
-      max_tokens: 1024,
-      stream: false,
-      messages: [{ role: "user", content: "hi" }],
-    }),
+    body: JSON.stringify(probeBody),
     signal: AbortSignal.timeout(15000),
   });
   const latencyMs = Date.now() - start;

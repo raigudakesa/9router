@@ -292,16 +292,19 @@ export class DefaultExecutor extends BaseExecutor {
     // preset incl. auth/Accept, case-insensitive. Fail-open: a bad template
     // must never break the request.
     const customHeaders = credentials?.providerSpecificData?.customHeaders;
-    if (customHeaders) {
+    const fallbackHeaders = credentials?.providerSpecificData?.fallbackHeaders;
+    if (customHeaders || fallbackHeaders) {
       try {
         const connId = credentials?.connectionId || credentials?.email || credentials?.id || "default";
         // Map lower header name → ttlMinutes for O(1) lookup in the hook.
         const ttlByName = new Map();
-        for (const h of customHeaders) {
-          if (h && typeof h.name === "string") ttlByName.set(h.name.trim().toLowerCase(), h.ttlMinutes);
+        for (const h of [...(customHeaders || []), ...(fallbackHeaders || [])]) {
+          if (h && typeof h.name === "string" && h.ttlMinutes != null) ttlByName.set(h.name.trim().toLowerCase(), h.ttlMinutes);
         }
         const nowFn = credentials?._nowForTest;
         const resolveValue = (name, rawValue, defaultResolve) => {
+          // Forwarded values are per-request — never cache or persist them.
+          if (rawValue.includes("{forward:")) return defaultResolve();
           const ttl = ttlByName.get(name.toLowerCase());
           // No caching when ttl is unset OR we have no real connection identity
           // (connId === "default") — avoids sharing a persistent value across accounts.
@@ -309,7 +312,11 @@ export class DefaultExecutor extends BaseExecutor {
           const key = connId + "\0" + name.toLowerCase() + "\0" + rawValue;
           return getOrResolvePersistent(key, ttl, defaultResolve, nowFn ? nowFn() : undefined);
         };
-        const resolved = resolveCustomHeaders(customHeaders, { resolveValue });
+        const resolved = resolveCustomHeaders(customHeaders, {
+          resolveValue,
+          requestHeaders: credentials?.rawHeaders,
+          fallbackHeaders,
+        });
         for (const [name, value] of Object.entries(resolved)) {
           const existing = Object.keys(headers).find((k) => k.toLowerCase() === name.toLowerCase());
           if (existing) delete headers[existing];

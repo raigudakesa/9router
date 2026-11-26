@@ -25,3 +25,12 @@ export function normalizeCustomHeaders(input) {
   }
   return { headers: [...byLower.values()], error: null };
 }
+
+// Fallback headers use the same row shape and validation; no TTL/persist.
+export function normalizeFallbackHeaders(input) {
+  if (!Array.isArray(input)) return { headers: [], error: null };
+  const { headers, error } = normalizeCustomHeaders(
+    input.map((row) => (row && typeof row === "object" ? { name: row.name, value: row.value } : row))
+  );
+  return { headers, error };
+}

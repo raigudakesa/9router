@@ -142,6 +142,11 @@ export default function CustomConfigCard({ providerId }) {
             })}
           </div>
 
+          <p className="mt-2 text-xs text-text-muted">
+            Value <code>{"{remove}"}</code> deletes a header, including ones the HTTP client adds
+            itself (e.g. <code>sec-fetch-mode</code>).
+          </p>
+
           <div className="mt-3 flex items-center justify-between gap-2">
             <button
               type="button"

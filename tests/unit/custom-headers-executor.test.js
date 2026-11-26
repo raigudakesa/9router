@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { DefaultExecutor } from "open-sse/executors/default.js";
+import { applyHeaderOverrides, collectRemoveHeaders } from "open-sse/utils/headerTemplate.js";
 import { __clearHeaderCache } from "open-sse/utils/headerCache.js";
 import { beforeEach } from "vitest";
 beforeEach(() => __clearHeaderCache());
@@ -125,5 +126,119 @@ describe("DefaultExecutor buildHeaders — persistence", () => {
     t = 1000 + 6 * 60000; // past 5 min → regenerate
     const c2 = ex.buildHeaders(mk(), true)["X-Session"];
     expect(c2).not.toBe(a);
+  });
+});
+
+describe("applyHeaderOverrides — provider settings overrides", () => {
+  it("replaces Accept case-insensitively instead of duplicating it", () => {
+    const ex = new DefaultExecutor("openai-compatible-chat-x");
+    const built = ex.buildHeaders(creds(undefined), true);
+    applyHeaderOverrides(built, { accept: "application/json" });
+    const keys = Object.keys(built).filter((k) => k.toLowerCase() === "accept");
+    expect(keys).toHaveLength(1);
+    expect(built[keys[0]]).toBe("application/json");
+  });
+
+  it("drops a header when the override value is {remove}", () => {
+    const ex = new DefaultExecutor("openai-compatible-chat-x");
+    const built = ex.buildHeaders(creds(undefined), true);
+    applyHeaderOverrides(built, { Accept: "{remove}" });
+    expect(Object.keys(built).filter((k) => k.toLowerCase() === "accept")).toHaveLength(0);
+  });
+});
+
+describe("collectRemoveHeaders — {remove} names for transport stripping", () => {
+  it("reads node customHeaders rows", () => {
+    expect(collectRemoveHeaders([{ name: "sec-fetch-mode", value: "{remove}" }, { name: "X-Keep", value: "1" }]))
+      .toEqual(["sec-fetch-mode"]);
+  });
+
+  it("reads a provider override map, trimming surrounding whitespace", () => {
+    expect(collectRemoveHeaders({ Accept: " {remove} ", "X-Keep": "1" })).toEqual(["Accept"]);
+  });
+
+  it("returns nothing for a non-remove set", () => {
+    expect(collectRemoveHeaders([{ name: "X", value: "pre {remove}" }])).toEqual([]);
+    expect(collectRemoveHeaders(undefined)).toEqual([]);
+  });
+});
+
+describe("transport strip — headers fetch injects itself", () => {
+  it("removes sec-fetch-mode and accept from the outgoing header set", async () => {
+    const { stripHeadersForTest } = await import("open-sse/utils/proxyFetch.js");
+    const out = stripHeadersForTest({ "sec-fetch-mode": "cors", accept: "*/*", "user-agent": "undici" }, ["Sec-Fetch-Mode", "accept"]);
+    expect(out).toEqual({ "user-agent": "undici" });
+  });
+
+  it("is a no-op with no names", async () => {
+    const { stripHeadersForTest } = await import("open-sse/utils/proxyFetch.js");
+    const input = { accept: "*/*" };
+    expect(stripHeadersForTest(input, [])).toBe(input);
+  });
+});
+
+describe("DefaultExecutor buildHeaders — {forward:Name}", () => {
+  const ex = () => new DefaultExecutor("openai-compatible-chat-x");
+
+  it("forwards the inbound client header value upstream", () => {
+    const c = creds([{ name: "X-Trace", value: "{forward:x-session-id}" }], { rawHeaders: { "x-session-id": "abc-123" } });
+    expect(ex().buildHeaders(c, true)["X-Trace"]).toBe("abc-123");
+  });
+
+  it("omits the header entirely when the source is absent", () => {
+    const c = creds([{ name: "X-Trace", value: "{forward:x-session-id}" }], { rawHeaders: {} });
+    const h = ex().buildHeaders(c, true);
+    expect(Object.keys(h).map((k) => k.toLowerCase())).not.toContain("x-trace");
+  });
+
+  it("is not persisted/cached even with ttlMinutes set (per-request value)", () => {
+    const mk = (sid) => creds([{ name: "X-Trace", value: "{forward:x-session-id}", ttlMinutes: 0 }], {
+      connectionId: "conn-1",
+      rawHeaders: { "x-session-id": sid },
+    });
+    const h1 = ex().buildHeaders(mk("a"), true);
+    const h2 = ex().buildHeaders(mk("b"), true);
+    expect(h1["X-Trace"]).toBe("a");
+    expect(h2["X-Trace"]).toBe("b");
+  });
+});
+
+describe("DefaultExecutor buildHeaders — fallbackHeaders", () => {
+  const ex = () => new DefaultExecutor("openai-compatible-chat-x");
+
+  it("sends the fallback when the forwarded source header is absent", () => {
+    const c = {
+      apiKey: "sk-test",
+      providerSpecificData: {
+        baseUrl: BASE,
+        apiType: "chat",
+        customHeaders: [{ name: "X-Trace", value: "{forward:x-session-id}" }],
+        fallbackHeaders: [{ name: "X-Trace", value: "default-trace" }],
+      },
+      rawHeaders: {},
+    };
+    expect(ex().buildHeaders(c, true)["X-Trace"]).toBe("default-trace");
+  });
+
+  it("prefers the primary forwarded value when present", () => {
+    const c = {
+      apiKey: "sk-test",
+      providerSpecificData: {
+        baseUrl: BASE,
+        apiType: "chat",
+        customHeaders: [{ name: "X-Trace", value: "{forward:x-session-id}" }],
+        fallbackHeaders: [{ name: "X-Trace", value: "default-trace" }],
+      },
+      rawHeaders: { "x-session-id": "abc" },
+    };
+    expect(ex().buildHeaders(c, true)["X-Trace"]).toBe("abc");
+  });
+
+  it("works with no customHeaders at all (fallback-only list)", () => {
+    const c = {
+      apiKey: "sk-test",
+      providerSpecificData: { baseUrl: BASE, apiType: "chat", fallbackHeaders: [{ name: "X-Default", value: "d" }] },
+    };
+    expect(ex().buildHeaders(c, true)["X-Default"]).toBe("d");
   });
 });

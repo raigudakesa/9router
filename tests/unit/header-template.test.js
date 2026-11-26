@@ -239,3 +239,152 @@ describe("resolveCustomHeaders — resolveValue hook", () => {
     expect(out["X-Copy"]).toBe("STABLE");
   });
 });
+
+describe("{forward:Name} — client request header forwarding", () => {
+  const req = { "X-Session-Id": "abc-123", empty: "", mixedcase: "Val" };
+
+  it("forwards the source header value", () => {
+    const out = resolveCustomHeaders([{ name: "X-Out", value: "{forward:x-session-id}" }], { requestHeaders: req });
+    expect(out["X-Out"]).toBe("abc-123");
+  });
+
+  it("matches the source header case-insensitively", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "A", value: "{forward:X-SESSION-ID}" }, { name: "B", value: "{forward:mixedCase}" }],
+      { requestHeaders: { "x-session-id": "abc-123", "MIXEDCASE": "Val" } }
+    );
+    expect(out).toEqual({ A: "abc-123", B: "Val" });
+  });
+
+  it("drops the header (sentinel) when the source is missing, empty or blank", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "A", value: "{forward:Nope}" }, { name: "B", value: "{forward:empty}" }, { name: "C", value: "{forward:blank}" }],
+      { requestHeaders: { ...req, blank: "   " } }
+    );
+    expect(out.A).toBe(REMOVE_HEADER);
+    expect(out.B).toBe(REMOVE_HEADER);
+    expect(out.C).toBe(REMOVE_HEADER);
+  });
+
+  it("drops the header when no request headers are supplied at all", () => {
+    const out = resolveCustomHeaders([{ name: "A", value: "{forward:X-Session-Id}" }]);
+    expect(out.A).toBe(REMOVE_HEADER);
+  });
+
+  it("supports wrapping text and other dynamic tags around the ref", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "A", value: "sid-{forward:x-session-id}-{num:2}" }],
+      { requestHeaders: req }
+    );
+    expect(out.A).toMatch(/^sid-abc-123-[0-9]{2}$/);
+  });
+
+  it("accepts a Headers-like object", () => {
+    const out = resolveCustomHeaders([{ name: "A", value: "{forward:x-session-id}" }], { requestHeaders: new Headers(req) });
+    expect(out.A).toBe("abc-123");
+  });
+});
+
+describe("fallbackHeaders — defaults when the primary value is unavailable", () => {
+  const req = { "x-session-id": "abc-123" };
+
+  it("primary value wins when it resolves", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "X-Trace", value: "primary" }],
+      { requestHeaders: req, fallbackHeaders: [{ name: "X-Trace", value: "fallback" }] }
+    );
+    expect(out["X-Trace"]).toBe("primary");
+  });
+
+  it("uses the fallback when the primary {forward:...} source is absent", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "X-Trace", value: "{forward:x-missing}" }],
+      { requestHeaders: req, fallbackHeaders: [{ name: "X-Trace", value: "fallback" }] }
+    );
+    expect(out["X-Trace"]).toBe("fallback");
+  });
+
+  it("uses the fallback when the primary value is empty", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "X-Trace", value: "" }],
+      { fallbackHeaders: [{ name: "X-Trace", value: "fallback" }] }
+    );
+    expect(out["X-Trace"]).toBe("fallback");
+  });
+
+  it("matches names case-insensitively", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "X-Trace", value: "{forward:nope}" }],
+      { fallbackHeaders: [{ name: "x-trace", value: "fallback" }] }
+    );
+    expect(out["X-Trace"]).toBe("fallback");
+  });
+
+  it("fallback entries with no primary counterpart are sent", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "X-A", value: "a" }],
+      { fallbackHeaders: [{ name: "X-Default", value: "d" }] }
+    );
+    expect(out).toEqual({ "X-A": "a", "X-Default": "d" });
+  });
+
+  it("fallback supports {forward:...} and dynamic tags too", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "X-S", value: "{forward:nope}" }],
+      { requestHeaders: req, fallbackHeaders: [{ name: "X-S", value: "sid-{forward:x-session-id}" }] }
+    );
+    expect(out["X-S"]).toBe("sid-abc-123");
+  });
+
+  it("drops the header when both primary and fallback are unavailable", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "X-S", value: "{forward:nope}" }],
+      { fallbackHeaders: [{ name: "X-S", value: "{forward:also-nope}" }] }
+    );
+    expect(out["X-S"]).toBe(REMOVE_HEADER);
+  });
+
+  it("primary {remove} is not resurrected by a fallback", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "X-S", value: "{remove}" }],
+      { fallbackHeaders: [{ name: "X-S", value: "fallback" }] }
+    );
+    expect(out["X-S"]).toBe(REMOVE_HEADER);
+  });
+
+  it("a {header:Name} ref can read a fallback-only header", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "X-Copy", value: "{header:X-Default}" }],
+      { fallbackHeaders: [{ name: "X-Default", value: "d" }] }
+    );
+    expect(out["X-Copy"]).toBe("d");
+  });
+});
+
+describe("{forward:User-Agent} — runtime-default UA is not a client identity", () => {
+  it("treats Node's own default UA (node / undici/N.x) as absent", () => {
+    for (const ua of ["node", "Node", "undici", "undici/6.19.2"]) {
+      const out = resolveCustomHeaders(
+        [{ name: "X-S", value: "{forward:user-agent}" }],
+        { requestHeaders: { "user-agent": ua }, fallbackHeaders: [{ name: "X-S", value: "fallback-ua" }] }
+      );
+      expect(out["X-S"]).toBe("fallback-ua");
+    }
+  });
+
+  it("still forwards a real client UA", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "X-S", value: "{forward:User-Agent}" }],
+      { requestHeaders: { "user-agent": "omp/19.2.1" }, fallbackHeaders: [{ name: "X-S", value: "fallback-ua" }] }
+    );
+    expect(out["X-S"]).toBe("omp/19.2.1");
+  });
+
+  it("only applies to User-Agent — other headers named node are forwarded", () => {
+    const out = resolveCustomHeaders(
+      [{ name: "X-S", value: "{forward:x-node}" }],
+      { requestHeaders: { "x-node": "node" } }
+    );
+    expect(out["X-S"]).toBe("node");
+  });
+});

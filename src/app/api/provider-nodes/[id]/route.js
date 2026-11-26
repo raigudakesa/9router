@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { deleteProviderConnectionsByProvider, deleteProviderNode, getProviderConnections, getProviderNodeById, updateProviderConnection, updateProviderNode } from "@/models";
-import { normalizeCustomHeaders } from "@/lib/customHeaders.js";
+import { normalizeCustomHeaders, normalizeFallbackHeaders } from "@/lib/customHeaders.js";
 
 // PUT /api/provider-nodes/[id] - Update provider node
 export async function PUT(request, { params }) {
@@ -35,6 +35,10 @@ export async function PUT(request, { params }) {
     if (headerError) {
       return NextResponse.json({ error: headerError }, { status: 400 });
     }
+    const { headers: fallbackHeaders, error: fallbackError } = normalizeFallbackHeaders(body.fallbackHeaders);
+    if (fallbackError) {
+      return NextResponse.json({ error: fallbackError }, { status: 400 });
+    }
 
     let sanitizedBaseUrl = baseUrl.trim();
     
@@ -59,10 +63,17 @@ export async function PUT(request, { params }) {
       prefix: prefix.trim(),
       baseUrl: sanitizedBaseUrl,
       customHeaders,
+      fallbackHeaders,
     };
 
     if (node.type === "openai-compatible") {
       updates.apiType = apiType;
+      // null clears the custom test payload; absent → untouched.
+      if (body.testPayload !== undefined) {
+        updates.testPayload = body.testPayload && typeof body.testPayload === "object" && !Array.isArray(body.testPayload)
+          ? body.testPayload
+          : null;
+      }
     }
 
     const updated = await updateProviderNode(id, updates);
@@ -77,6 +88,7 @@ export async function PUT(request, { params }) {
           baseUrl: sanitizedBaseUrl,
           nodeName: updated.name,
           customHeaders,
+          fallbackHeaders,
         }
       })
     )));

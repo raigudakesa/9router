@@ -4,6 +4,7 @@ import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { dbg } from "../utils/debugLog.js";
 import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE } from "../providers/shared.js";
 import { resolveOpenAICompatibleApiType } from "../services/provider.js";
+import { applyHeaderOverrides, collectRemoveHeaders } from "../utils/headerTemplate.js";
 
 /**
  * BaseExecutor - Base class for provider executors
@@ -129,8 +130,18 @@ export class BaseExecutor {
       const url = this.buildUrl(model, stream, urlIndex, credentials);
       const transformedBody = this.transformRequest(model, body, stream, credentials);
       const headers = this.buildHeaders(credentials, stream, url, model, transformedBody);
-      // User per-provider override wins over registry headers (blocked names filtered at the API)
-      if (providerOverrides?.headers) Object.assign(headers, providerOverrides.headers);
+      // User per-provider override wins over registry headers (blocked names filtered at the API).
+      // applyHeaderOverrides replaces case-insensitively — plain Object.assign leaves both
+      // `Accept` and `accept` in the set and fetch merges them into "a, b".
+      if (providerOverrides?.headers) applyHeaderOverrides(headers, providerOverrides.headers);
+      // {remove} on a header fetch injects itself (sec-fetch-mode, default accept)
+      // cannot be expressed by deleting it here — fetch re-adds it. Hand the names
+      // to the transport so they are stripped from the final dispatch payload.
+      const stripHeaders = [
+        ...collectRemoveHeaders(providerOverrides?.headers),
+        ...collectRemoveHeaders(credentials?.providerSpecificData?.customHeaders),
+        ...collectRemoveHeaders(credentials?.providerSpecificData?.fallbackHeaders),
+      ];
 
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 
@@ -155,6 +166,7 @@ export class BaseExecutor {
           // Protocol adapters that need their own transport (opencode's TLS
           // fingerprint) override the direct path; proxies still take priority.
           ...(directFetch ? { directFetch } : {}),
+          ...(stripHeaders.length ? { _stripHeaders: stripHeaders } : {}),
         }, effectiveProxyOptions);
         clearTimeout(connectTimer);
         const ct = response.headers?.get?.("content-type") || "";

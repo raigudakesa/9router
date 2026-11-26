@@ -55,7 +55,20 @@ const getChatErrorMessage = (status) => {
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { baseUrl, apiKey, type, modelId } = body;
+    const { baseUrl, apiKey, type, modelId, testPayload } = body;
+
+    // Custom test payload (node editor): layered over the default probe.
+    // `model` stays authoritative so the node's real id is used.
+    const customPayload = testPayload && typeof testPayload === "object" && !Array.isArray(testPayload)
+      ? testPayload
+      : null;
+    const buildProbeBody = (model) => ({
+      messages: [{ role: "user", content: "ping" }],
+      max_tokens: 1,
+      ...(customPayload || {}),
+      model,
+      stream: false,
+    });
 
     if (!baseUrl || !apiKey) {
       return NextResponse.json({ error: "Base URL and API key required" }, { status: 400 });
@@ -139,11 +152,7 @@ export async function POST(request) {
             "x-api-key": apiKey,
             "anthropic-version": "2023-06-01"
           },
-          body: JSON.stringify({
-            model: modelId,
-            messages: [{ role: "user", content: "ping" }],
-            max_tokens: 1
-          })
+          body: JSON.stringify(buildProbeBody(modelId))
         });
         if (chatRes.ok) {
           return NextResponse.json({ valid: true, method: "chat" });
@@ -158,44 +167,47 @@ export async function POST(request) {
       return NextResponse.json({ valid: false, error: getModelsErrorMessage(res.status) });
     }
 
-    // OpenAI Compatible Validation (Default)
-    const modelsUrl = `${baseUrl.replace(/\/$/, "")}/models`;
-    const res = await fetchWithTimeout(modelsUrl, {
-      headers: { "Authorization": `Bearer ${apiKey}` },
-    });
-
-    if (res.ok) return NextResponse.json({ valid: true });
-
-    // Auth errors - no point trying chat fallback
-    if (res.status === 401 || res.status === 403) {
-      return NextResponse.json({ valid: false, error: "API key unauthorized" });
+    // A custom payload means the user wants a chat probe, not a /models listing.
+    if (customPayload && !modelId) {
+      return NextResponse.json({ valid: false, error: "Model ID required when testing with a custom payload" });
     }
 
-    // Fallback: try chat/completions if modelId provided
-    if (modelId) {
-      const chatRes = await fetchWithTimeout(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: modelId,
-          messages: [{ role: "user", content: "ping" }],
-          max_tokens: 1
-        })
+    // Generic compatible-provider validation (default)
+    if (!customPayload) {
+      const modelsUrl = `${baseUrl.replace(/\/$/, "")}/models`;
+      const res = await fetchWithTimeout(modelsUrl, {
+        headers: { "Authorization": `Bearer ${apiKey}` },
       });
-      if (chatRes.ok) {
-        return NextResponse.json({ valid: true, method: "chat" });
+
+      if (res.ok) return NextResponse.json({ valid: true });
+
+      // Auth errors - no point trying chat fallback
+      if (res.status === 401 || res.status === 403) {
+        return NextResponse.json({ valid: false, error: "API key unauthorized" });
       }
-      return NextResponse.json({
-        valid: false,
-        error: getChatErrorMessage(chatRes.status),
-        method: "chat"
-      });
+
+      if (!modelId) {
+        return NextResponse.json({ valid: false, error: getModelsErrorMessage(res.status) });
+      }
     }
 
-    return NextResponse.json({ valid: false, error: getModelsErrorMessage(res.status) });
+    // Chat probe: custom payload, or /models fallback when a model ID is given.
+    const chatRes = await fetchWithTimeout(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(buildProbeBody(modelId))
+    });
+    if (chatRes.ok) {
+      return NextResponse.json({ valid: true, method: "chat" });
+    }
+    return NextResponse.json({
+      valid: false,
+      error: getChatErrorMessage(chatRes.status),
+      method: "chat"
+    });
   } catch (error) {
     const errorMessage = getErrorMessage(error);
     console.error("Error validating provider node:", {

@@ -45,6 +45,43 @@ async function rawFetch(url, options) {
   return undiciFetch(url, options);
 }
 
+// Drop named headers from an explicit header set (object, Headers, or [name, value][]).
+function stripHeaders(headers, names) {
+  if (!headers || !names?.length) return headers;
+  const lower = new Set(names.map((n) => String(n).toLowerCase()));
+  if (headers instanceof Headers) {
+    const out = new Headers();
+    for (const [k, v] of headers.entries()) if (!lower.has(k.toLowerCase())) out.append(k, v);
+    return out;
+  }
+  if (Array.isArray(headers)) return headers.filter(([k]) => !lower.has(String(k).toLowerCase()));
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) if (!lower.has(k.toLowerCase())) out[k] = v;
+  return out;
+}
+
+export const stripHeadersForTest = stripHeaders;
+
+// Wrap a dispatcher so headers fetch injects itself (sec-fetch-mode, the default
+// accept, accept-language) are stripped on the way out. undici sets those after
+// our header set is handed to fetch, so deleting them from `options.headers`
+// cannot work — the dispatch payload is the last point we control.
+function withHeaderStrip(dispatcher, names) {
+  if (!dispatcher || !names?.length) return dispatcher;
+  return new Proxy(dispatcher, {
+    get(target, prop) {
+      if (prop === "dispatch") {
+        return (opts, handlers) => target.dispatch(
+          opts?.headers ? { ...opts, headers: stripHeaders(opts.headers, names) } : opts,
+          handlers,
+        );
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 // ─── TLS fingerprinting via got-scraping (browser-like JA3) ───────────────
 // Disabled: not in use. Kept commented for future re-enable.
 // Restore the original block to re-enable per-host JA3 spoofing.
@@ -440,11 +477,12 @@ function isBodyReplaySafe(body) {
 }
 
 async function fetchWithTlsFallback(url, options, proxyUrl, forceFreshSocket = false) {
+  const strip = options?._stripHeaders;
   try {
     // Protocol adapters may need Node's HTTP/1 transport on the direct path.
     // Keep proxy/no-proxy resolution and strict-proxy enforcement here.
-    if (!proxyUrl && options.directFetch) return await options.directFetch(url, options);
-    const dispatcher = await getDispatcher(proxyUrl, false, forceFreshSocket);
+    if (!proxyUrl && options.directFetch) return await options.directFetch(url, { ...options, headers: stripHeaders(options.headers, strip) });
+    const dispatcher = withHeaderStrip(await getDispatcher(proxyUrl, false, forceFreshSocket), strip);
     return await rawFetch(url, { ...options, dispatcher });
   } catch (err) {
     const isStrictSsl = options.strictTls === true || process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";
@@ -454,7 +492,7 @@ async function fetchWithTlsFallback(url, options, proxyUrl, forceFreshSocket = f
       }
       // ponytail: in-memory insecure agent fallback for self-signed MITM corporate/antivirus certs
       console.warn(`[ProxyFetch] TLS cert verification failed (${err.cause?.code || err.code}), retrying with insecure TLS: ${url}`);
-      const insecureDispatcher = await getDispatcher(proxyUrl, true, forceFreshSocket);
+      const insecureDispatcher = withHeaderStrip(await getDispatcher(proxyUrl, true, forceFreshSocket), strip);
       return await rawFetch(url, { ...options, dispatcher: insecureDispatcher });
     }
 
@@ -545,6 +583,8 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   }
   const targetUrl = typeof url === "string" ? url : url.toString();
 
+  const stripNames = options?._stripHeaders;
+
   // Vercel relay: forward request via relay headers
   const vercelRelayUrl = normalizeString(proxyOptions?.vercelRelayUrl);
   if (vercelRelayUrl) {
@@ -553,7 +593,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       ? Object.fromEntries(options.headers.entries())
       : { ...(options.headers || {}) };
     const relayHeaders = {
-      ...baseHeaders,
+      ...stripHeaders(baseHeaders, stripNames),
       "x-relay-target": `${parsed.protocol}//${parsed.host}`,
       "x-relay-path": `${parsed.pathname}${parsed.search}`,
     };
@@ -572,7 +612,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   // keep the undici path below.
   if (proxyUrl && options?.directFetch?.proxyCapable === true) {
     try {
-      const res = await options.directFetch(url, { ...options, proxyUrl }, proxyUrl);
+      const res = await options.directFetch(url, { ...options, headers: stripHeaders(options.headers, stripNames), proxyUrl }, proxyUrl);
       // Reported only after the adapter that holds the tunnel returned.
       const via = res?.headers?.get?.("x-9r-proxy-via");
       dbg("PROXY", `PROXY ROUTING VERIFIED | ${safeTargetHost(targetUrl)} | transport=adapter | proxy=${via || safeProxyHost(proxyUrl)} | status=${res?.status}`);

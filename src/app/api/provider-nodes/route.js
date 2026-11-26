@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createProviderNode, getProviderNodes } from "@/models";
-import { normalizeCustomHeaders } from "@/lib/customHeaders.js";
+import { normalizeCustomHeaders, normalizeFallbackHeaders } from "@/lib/customHeaders.js";
 import { OPENAI_COMPATIBLE_PREFIX, ANTHROPIC_COMPATIBLE_PREFIX, CUSTOM_EMBEDDING_PREFIX } from "@/shared/constants/providers";
 import { generateId } from "@/shared/utils";
 
@@ -47,6 +47,10 @@ export async function POST(request) {
     if (headerError) {
       return NextResponse.json({ error: headerError }, { status: 400 });
     }
+    const { headers: fallbackHeaders, error: fallbackError } = normalizeFallbackHeaders(body.fallbackHeaders);
+    if (fallbackError) {
+      return NextResponse.json({ error: fallbackError }, { status: 400 });
+    }
 
     // Determine type
     const nodeType = type || "openai-compatible";
@@ -64,6 +68,7 @@ export async function POST(request) {
         baseUrl: (baseUrl || OPENAI_COMPATIBLE_DEFAULTS.baseUrl).trim(),
         name: name.trim(),
         customHeaders,
+        fallbackHeaders,
       });
       return NextResponse.json({ node }, { status: 201 });
     }
@@ -82,6 +87,7 @@ export async function POST(request) {
         baseUrl: sanitizedBaseUrl,
         name: name.trim(),
         customHeaders,
+        fallbackHeaders,
       });
       return NextResponse.json({ node }, { status: 201 });
     }
@@ -101,6 +107,7 @@ export async function POST(request) {
         baseUrl: sanitizedBaseUrl,
         name: name.trim(),
         customHeaders,
+        fallbackHeaders,
       });
       return NextResponse.json({ node }, { status: 201 });
     }
